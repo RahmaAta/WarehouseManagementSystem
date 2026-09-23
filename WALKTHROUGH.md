@@ -24,6 +24,7 @@
 15. [شرح المرحلة الأولى بالتفصيل (Phase 1: Solution Setup)](#10-phase-1-walkthrough-solution-setup--clean-architecture-in-depth)
 16. [شرح المرحلة الثانية بالتفصيل (Phase 2: Core Domain & Business Rules)](#11-phase-2-walkthrough-core-domain-entities--business-rules-in-depth)
 17. [شرح المرحلة الثالثة بالتفصيل (Phase 3: Database & EF Core Persistence)](#12-phase-3-walkthrough-database--ef-core-persistence-in-depth)
+18. [شرح المرحلة الرابعة بالتفصيل (Phase 4: JWT Authentication & RBAC)](#13-phase-4-walkthrough-jwt-authentication--rbac-in-depth)
 
 ---
 
@@ -506,6 +507,97 @@ purchaseOrder.Status = PurchaseOrderStatus.Received; // استلم بضاعة م
 > "In Clean Architecture, the Domain layer must remain pure and free of infrastructure concerns. Using Fluent API in the Infrastructure layer isolates database mappings (indexes, constraints, precision) from entity definitions. Furthermore, EF Core's `DbContext` inherently implements the **Unit of Work** pattern (coordinating multiple repository/DbSet operations within a single transaction during `SaveChangesAsync`), while `DbSet<T>` serves as the **Repository**. Wrapping EF Core in a generic repository often introduces unnecessary abstraction, hiding valuable capabilities like projections and async query streaming."
 
 ---
+
+## 13. Phase 4 Walkthrough: JWT Authentication & RBAC In-Depth
+
+### 1. What are we doing? (ماذا نفعل؟)
+قمنا ببناء منظومة الأمان والتحقق من الهوية والصلاحيات بالكامل:
+1. **تثبيت حزم الأمان**:
+   - `System.IdentityModel.Tokens.Jwt` و `Microsoft.AspNetCore.Cryptography.KeyDerivation` في الـ `Infrastructure`.
+   - `Microsoft.AspNetCore.Authentication.JwtBearer` في الـ `API`.
+   - `MediatR` في الـ `Application`.
+2. **عقود الأمان المجردة في Application**:
+   - `IPasswordHasher`: لتشفير وفحص كلمات المرور.
+   - `IJwtTokenGenerator`: لتوليد التوكن الرقمي الموقّع ومرفق به Claims المستخدم ودوره.
+   - `ICurrentUserService`: للوصول لبيانات المستخدم الحالي والـ Role من سياق الطلب.
+3. **أول ميزات CQRS عبر MediatR**:
+   - `RegisterUserCommand` & `RegisterUserCommandHandler`: فحص عدم تكرار اسم المستخدم والبريد، تشفير كلمة المرور بـ Salt عشوائي، حفظ المستخدم، وتوليد التوكن.
+   - `LoginCommand` & `LoginCommandHandler`: التحقق من صحة الحساب وكونه مفعلاً، ومقارنة الـ Hash، وتوليد التوكن.
+4. **تشفير كلمات المرور في Infrastructure**:
+   - استخدام خوارزمية **PBKDF2** (HMAC-SHA256 مع 100,000 تكرار و 128-bit salt) والمقارنة بـ `FixedTimeEquals` لمنع هجمات التوقيت (Timing Attacks).
+5. **تأمين الـ API و Middleware**:
+   - ضبط `JwtBearerOptions` في `Program.cs`.
+   - ترتيب الـ Middleware الصحيح: `app.UseAuthentication()` قبل `app.UseAuthorization()`.
+   - إنشاء `AuthController` بـ Endpoints للتسجيل، الدخول، وتجربة الـ `[Authorize]`.
+6. **Unit Tests للأمان**:
+   - إضافة 7 اختبارات وحدة لفحص تشفير كلمات المرور وتوليد التوكن والتأكد من وجود الـ Claims الصحيحة.
+
+---
+
+### 2. Why are we doing it? (لماذا نفعل ذلك؟)
+في أنظمة الـ Backend، لا يمكن أن نثق في أي طلب قادم من الإنترنت دون معرفة:
+- **من أنت؟ (Authentication - التحقق من الهوية)**.
+- **ما هي صلاحياتك؟ (Authorization - التفويض والصلاحيات)**.
+في نظام المستودعات، لا يجوز لموظف عادي (`WarehouseStaff`) أن يعتمد أمر شراء (`Approve Purchase Order`) أو يضيف مستخدماً جديداً؛ هذه صلاحيات حصرية لـ `WarehouseManager` و `Admin`.
+
+---
+
+### 3. Why is this useful in a real backend? (فائدته في سوق العمل)
+- **Stateless Architecture**: الـ JWT يجعل السيرفر Stateless؛ السيرفر لا يحتاج لحفظ جلسات (Sessions) في الذاكرة (RAM). التوكن مشفر وموقّع رقمياً، ويحتوي على الـ Claims اللازمة، مما يتيح عمل Scale للـ API على 10 سيرفرات مختلفة دون مشاكل تزامن الجلسات.
+- **Role-Based Protection**: حماية الـ Endpoints بسهولة عبر Attributes مثل:
+  ```csharp
+  [Authorize(Roles = "Admin,WarehouseManager")]
+  ```
+
+---
+
+### 4. Why did we choose this approach? (لماذا هذا التوجه تحديداً؟)
+1. **PBKDF2 مع Salt عشوائي بدلاً من Plain Text أو MD5/SHA256 البسيط**:
+   - تشفير الباسورد بـ SHA256 فقط معرض لـ Rainbow Table Attacks (جداول كلمات السر المحسوبة مسبقاً).
+   - الـ Salt العشوائي يجعل كل هاش فريداً حتى لو اختار مستخدمان نفس كلمة المرور تماماً.
+   - الـ 100,000 تكرار (Iterations) تبطئ هجمات الـ Brute Force بالمليارات!
+2. **Custom Lightweight Auth بدلاً من ASP.NET Identity الضخم**:
+   - حافظنا على الـ Domain خالياً من الاعتماد على مكتبات مايكروسوفت الثقيلة، ولدينا تحكم كامل في جداول `Users` و `Roles`.
+
+---
+
+### 5. What alternatives exist? (ما هي البدائل؟)
+1. **Cookie-based Session Authentication**: حفظ SessionId في الكوكيز وتخزين الجلسة في السيرفر أو Redis.
+2. **OAuth2 / OpenID Connect Server خارجي**: مثل Duende IdentityServer أو Auth0 أو Keycloak.
+
+---
+
+### 6. Why are we NOT using those alternatives here? (لماذا رفضنا البدائل؟)
+- **Cookie Sessions**: سيئة للـ REST APIs التي تخدم تطبيقات الموبايل والـ Single Page Applications (SPAs)، وتتطلب حفظ حالة (Stateful).
+- **External Identity Server (Auth0 / Keycloak)**: حل ممتاز للأنظمة العملاقة (Microservices)، لكن لمشروعنا واستعراض مهارات الـ Backend في المقابلات، بناء الـ JWT المدمج يظهر فهمك العميق لكيفية بناء الـ Security Pipeline بأكمله.
+
+---
+
+### 7. What problem does this approach solve? (ما المشكلة التي يحلها؟)
+- **Timing Attacks (هجمات التوقيت)**:
+  - عند مقارنة الهاش بـ `if (hash == expectedHash)`، المقارنة تقف عند أول حرف خطأ، مما يمكن المخترق من قياس سرعة الاستجابة بالنانو ثانية لمعرفة الحروف الصحيحة!
+  - **الحل**: استخدمنا `CryptographicOperations.FixedTimeEquals` لمقارنة السلاسل المشفرة في زمن ثابت دائماً.
+
+---
+
+### 8. What could go wrong? (ما الذي قد يفشل وكيف نتجنبه؟)
+- **Middleware Order Bug (كارثة ترتيب الـ Middleware)**:
+  - لو وضعت `app.UseAuthorization()` قبل `app.UseAuthentication()`، السيستم سيفشل في قراءة الـ Token وسيعتبر كل المستخدمين غير مسجلين ويرجع `401 Unauthorized` دائماً!
+  - **القاعدة الذهبية**: "مينفعش أقرر صلاحياتك (Authorization) قبل ما أعرف أنت مين أصلاً (Authentication)!"
+- **Secret Key Weakness**:
+  - استخدام مفتاح سري قصير يسبب خطأ فوري في مكتبة `Microsoft.IdentityModel.Tokens`؛ لأن خوارزمية HMAC-SHA256 تتطلب مفتاحاً لا يقل عن 256 بت (32 حرفاً على الأقل).
+
+---
+
+### 9. What should I remember for an interview? (ماذا تقول في الإنترفيو؟)
+> **Interview Question**: "Explain the difference between Authentication and Authorization, and how JWT works in ASP.NET Core."
+>
+> **الإجابة النموذجية**:
+> "**Authentication** is verifying *who you are* (e.g., via username and password), whereas **Authorization** is verifying *what you are allowed to do* (e.g., checking if your Role allows approving a purchase order).  
+> A **JWT** consists of three Base64Url-encoded parts: Header (algorithm), Payload (claims like UserId and Role), and Signature (signed with a secret key). When a client sends the token in the `Authorization: Bearer <token>` header, the `JwtBearerMiddleware` validates the signature, lifetime, and issuer using `TokenValidationParameters`, and constructs a `ClaimsPrincipal` attached to `HttpContext.User`. This enables role checks via `[Authorize(Roles = "...")]` in a completely stateless manner."
+
+---
+
 
 
 
