@@ -22,6 +22,7 @@
 13. [استراتيجية الـ Git والـ Feature Branches](#13-git-workflow)
 14. [دليل أسئلة الإنترفيو المتقدمة (Interview Preparation)](#14-interview-preparation)
 15. [شرح المرحلة الأولى بالتفصيل (Phase 1: Solution Setup)](#10-phase-1-walkthrough-solution-setup--clean-architecture-in-depth)
+16. [شرح المرحلة الثانية بالتفصيل (Phase 2: Core Domain & Business Rules)](#11-phase-2-walkthrough-core-domain-entities--business-rules-in-depth)
 
 ---
 
@@ -328,4 +329,100 @@ API ──► Application ──► Domain ◄── Infrastructure
 > "In Clean Architecture, source code dependencies must point inward, toward higher-level policies. The Domain layer sits at the core with zero external dependencies. The Application layer orchestrates business use cases and defines abstractions (interfaces). The Infrastructure layer implements these abstractions, and the API layer serves purely as an entry point. This guarantees that business logic remains completely independent of frameworks, databases, and UI concerns."
 
 ---
+
+## 11. Phase 2 Walkthrough: Core Domain Entities & Business Rules In-Depth
+
+### 1. What are we doing? (ماذا نفعل؟)
+قمنا ببناء **قلب النظام (Domain Core)** داخل `WarehouseManagement.Domain`:
+1. **Base & Auditable Classes**:
+   - `BaseEntity`: يحمل الـ `Id` (الـ Identity).
+   - `AuditableEntity`: يحمل `CreatedAt`, `CreatedBy`, `LastModifiedAt`, `LastModifiedBy` للتدقيق المحاسبي والتاريخي لكل صف.
+2. **Domain Enums**:
+   - `OrderStatus` (`Pending`, `Confirmed`, `Cancelled`, `Completed`).
+   - `PurchaseOrderStatus` (`Draft`, `PendingApproval`, `Approved`, `Received`, `Cancelled`).
+   - `StockTransactionType` (`StockIn`, `StockOut`, `Transfer`).
+   - `UserRoleType` (`Admin`, `WarehouseManager`, `WarehouseStaff`).
+3. **Rich Domain Entities (الكيانات الغنية بالبيزنس)**:
+   - `Product`, `Category`, `Supplier`, `Customer`, `Warehouse`.
+   - `InventoryItem`: إدارة الكميات، الكميات المحجوزة (`ReservedQuantity`)، والـ `RowVersion` للتحكم في التزامن (Concurrency).
+   - `StockTransaction`: سجل الحركات غير القابل للتعديل، مع Factory Methods (`CreateStockIn`, `CreateStockOut`, `CreateTransfer`).
+   - `PurchaseOrder` & `PurchaseOrderItem`: دورة الشراء، الاعتماد، والاستلام وحساب التكلفة.
+   - `SalesOrder` & `SalesOrderItem`: دورة البيع، الفحص، التأكيد، والإكمال.
+   - `User` & `Role`: إدارة بيانات المستخدمين والصلاحيات.
+4. **Domain Invariant Exceptions**:
+   - `DomainException` (Base class).
+   - `InsufficientStockException`.
+   - `InvalidOrderStateException`.
+   - `NegativePriceException`.
+   - `SameWarehouseTransferException`.
+5. **Unit Tests**:
+   - كتابة 11 اختبار وحدة في `WarehouseManagement.UnitTests` للتأكد من حماية الـ Invariants برمجياً.
+
+---
+
+### 2. Why are we doing it? (لماذا نفعل ذلك؟)
+في الأنظمة الحقيقية، الـ **Domain Model هو الحارس الأول على صحة البيانات (Data Integrity)**.
+لو سمحنا بـ "Anemic Domain Model" (مجرد كلاسات فاضية فيها getters و setters عامة `public set`)، أي مبرمج أو Controller في المستقبل يقدر يكتب:
+```csharp
+inventoryItem.Quantity = -50; // كارثة! مخزون بالسالب!
+purchaseOrder.Status = PurchaseOrderStatus.Received; // استلم بضاعة من غير ما المدير يوافق!
+```
+لذلك، جعلنا الـ Setters خاصة (`private set`) وكل تعديل يمر من خلال **Domain Methods** تطبق قواعد البيزنس وترمي Exceptions واضحة لو حصل أي انتهاك!
+
+---
+
+### 3. Why is this useful in a real backend? (فائدته في سوق العمل)
+- **منع الفساد المالي والمخزني (Preventing State Corruption)**: لا يمكن خروج بضاعة لا نملكها، ولا يمكن استلام شحنة لم يتم اعتماد أمر شرائها.
+- **Single Source of Truth**: قاعدة البيزنس مكتوبة مرة واحدة داخل الـ Entity، وليس مكررة في 5 Controllers و 3 Services.
+- **سهولة الاختبار (Instant Unit Testing)**: اختبرنا 11 سيناريو معقد في 60 مللي ثانية بدون تشغيل داتابيز وبدون تشغيل الـ API!
+
+---
+
+### 4. Why did we choose this approach? (لماذا هذا التوجه تحديداً؟)
+اتبعنا أسلوب **Rich Domain Model** بدلاً من **Anemic Domain Model**:
+- الكيان هو المسؤول عن حماية حالته (Encapsulation).
+- استخدام الـ Private Setters والدوال الدلالية مثل:
+  - `po.MarkAsReceived(staffUser)` بدلاً من `po.Status = 4`.
+  - `inventory.ReserveStock(quantity)` بدلاً من حسابات يدوية مبعثرة.
+
+---
+
+### 5. What alternatives exist? (ما هي البدائل؟)
+1. **Anemic Domain Model**: كلاسات مجرد DTOs بخصائص `{ get; set; }`، وكل العمليات الحسابية والـ if conditions مكتوبة جوه الـ Services أو الـ Handlers.
+2. **Database Triggers / Stored Procedures**: وضع القواعد والتحقق جوه SQL Server مباشرة.
+
+---
+
+### 6. Why are we NOT using those alternatives here? (لماذا رفضنا البدائل؟)
+- **Anemic Model**: كابوس في الصيانة! لو احتجت تغير شرط التأكيد، هتدور في المشروع كله على الأماكن اللي بتعدل `Status`.
+- **Database Triggers**: صعبة جداً في الـ Version Control والـ Unit Testing، وتربط النظام بمحرك داتابيز محدد وتخفي الـ Business Rules عن أعين المطورين في الـ C#.
+
+---
+
+### 7. What problem does this approach solve? (ما المشكلة التي يحلها؟)
+- **Invalid State Transitions**:
+  - هل ينفع أمر شراء `Draft` يتحول فجأة لـ `Received`؟ **مستحيل!** الكود هيرمي `InvalidOrderStateException`.
+  - هل ينفع نحول بضاعة من مستودع 1 لنفس مستودع 1؟ **مستحيل!** الكود هيرمي `SameWarehouseTransferException`.
+  - هل ينفع نبيع منتج بسعر سالب؟ **مستحيل!** الكود هيرمي `NegativePriceException`.
+
+---
+
+### 8. What could go wrong? (ما الذي قد يفشل وكيف نتجنبه؟)
+- **EF Core Parameterless Constructor**:
+  - الـ EF Core يحتاج إلى Parameterless Constructor لإنشاء الكائنات عند قراءتها من الداتابيز.
+  - **الحل**: أضفنا `protected EntityName() { }` في كل كيان ليستخدمها EF Core مع إجبار باقي المطورين على استخدام الـ Public Constructor أو الـ Factory Method.
+- **Collections Mutation**:
+  - لو عرّفنا الـ Items كـ `public List<SalesOrderItem> Items { get; set; }`، أي شخص من الخارج يقدر يعمل `order.Items.Clear()` ويتجاوز حساب الـ `TotalAmount`!
+  - **الحل**: جعلنا الـ List داخلية `private readonly List<T> _items` وعرّفنا الخاصية العامة كـ `IReadOnlyCollection<T> Items => _items.AsReadOnly()`.
+
+---
+
+### 9. What should I remember for an interview? (ماذا تقول في الإنترفيو؟)
+> **Interview Question**: "What is the difference between an Anemic Domain Model and a Rich Domain Model?"
+>
+> **الإجابة النموذجية**:
+> "An **Anemic Domain Model** treats entities as plain data containers with getters and setters, pushing all business logic into service layers. This violates OOP encapsulation and leads to duplicated logic. In contrast, a **Rich Domain Model** encapsulates data alongside the business rules and state transitions that govern it (e.g., using private setters, factory methods, and domain invariant methods). This guarantees that an entity can never exist in an invalid state."
+
+---
+
 
