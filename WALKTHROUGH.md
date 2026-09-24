@@ -908,6 +908,96 @@ purchaseOrder.Status = PurchaseOrderStatus.Received; // استلم بضاعة م
 
 ---
 
+## 17. Suppliers & Customers Feature (إدارة الموردين والعملاء)
+
+### 1. What was done? (ما الذي تم إنجازه؟)
+1. **Suppliers CQRS (إدارة الموردين)**:
+   - **Commands**:
+     - `CreateSupplierCommand`: تسجيل مورد خارجي مع التحقق من فرادية البريد الإلكتروني (`Email`).
+     - `UpdateSupplierCommand`: تحديث بيانات المورد وجهة الاتصال (`ContactPerson`) وتفاصيل العنوان مع منع تكرار البريد.
+     - `DeleteSupplierCommand`: الحذف المنطقي الآمن (`supplier.Deactivate()`) لحماية السجلات المالية وسجلات أوامر الشراء التاريخية (`PurchaseOrders`).
+     - `ActivateSupplierCommand`: إعادة تفعيل المورد المعطل.
+   - **Queries**:
+     - `GetSuppliersQuery`: استعلام مرقم (`PaginatedList<SupplierDto>`) يدعم البحث في الاسم والبريد وجهة الاتصال، مع عدّاد أوامر الشراء التابعة لكل مورد.
+     - `GetSupplierByIdQuery`: استعلام مورد محدد بالـ ID.
+2. **Customers CQRS (إدارة العملاء)**:
+   - **Commands**:
+     - `CreateCustomerCommand`: تسجيل عميل جديد وفحص فرادية البريد الإلكتروني.
+     - `UpdateCustomerCommand`: تعديل بيانات العميل وعنوان الشحن.
+     - `DeleteCustomerCommand`: الحذف المنطقي الآمن (`customer.Deactivate()`) للحفاظ على أرشيف أوامر البيع (`SalesOrders`) والفواتير الضريبية.
+     - `ActivateCustomerCommand`: إعادة تفعيل العميل.
+   - **Queries**:
+     - `GetCustomersQuery`: استعلام مرقم (`PaginatedList<CustomerDto>`) يدعم البحث في الاسم والبريد والهاتف، مع عدّاد أوامر البيع لكل عميل.
+     - `GetCustomerByIdQuery`: استعلام عميل محدد بالـ ID.
+3. **RESTful Controllers with RBAC**:
+   - `SuppliersController`: استعلامات مرقمة ومسارات CRUD محمية بصلاحيات `[Authorize(Roles = "Admin,WarehouseManager")]`.
+   - `CustomersController`: استعلامات مرقمة ومسارات CRUD محمية بصلاحيات `[Authorize(Roles = "Admin,WarehouseManager")]`.
+4. **Automated Unit Testing**:
+   - إضافة 14 اختبار وحدة جديد (7 للموردين + 7 للعملاء) لتصل الحصيلة الإجمالية إلى **74 اختباراً ناجحاً بنسبة 100%**.
+
+---
+
+### 2. Why are we doing it? (لماذا نفعل ذلك؟)
+- نظام إدارة المستودعات (WMS) هو حلقة الوصل بين **المدخلات (Inbound)** القادمة من **الموردين (Suppliers)** عبر أوامر الشراء (`Purchase Orders`)، وبين **المخرجات (Outbound)** المتجهة إلى **العملاء (Customers)** عبر أوامر البيع (`Sales Orders`).
+- وجود كيانات وسيطة موثوقة للموردين والعملاء هو الأساس الإلزامي قبل الشروع في بناء دورة حياة أوامر الشراء وأوامر البيع.
+
+---
+
+### 3. Why is this useful in a real backend? (فائدته في سوق العمل)
+- **Data Isolation & Business Auditability**:
+  - لا يمكن تسجيل أمر شراء باسم نصي مجرد ("مورد مجهول")؛ لأن المحاسبة وسلاسل الإمداد تتطلب معرفة شروط التوريد وجهات الاتصال وأرقام الهاتف وعناوين المخازن.
+- **Referential Integrity with Soft Deletes**:
+  - إذا توقفت الشركة عن التعامل مع مورد أو عميل، حذفه الفعلي من قاعدة البيانات (`Hard Delete`) سيتسبب في مسح تاريخ مبيعات ومشتريات الشركة أو كسر الـ Foreign Keys. الحذف المنطقي (`Deactivate`) يضمن أرشفة السجلات مع منع إصدار فواتير جديدة له.
+
+---
+
+### 4. Why did we choose this approach? (لماذا هذا التوجه تحديداً؟)
+1. **Case-Insensitive Unique Email Validation**:
+   - فحص الـ Email قبل الإنشاء يمنع إنشاء حسابين لنفس العميل أو المورد بحروف كبيرة وصغيرة (`sales@vendor.com` مقابل `Sales@Vendor.com`).
+2. **Server-Side Offset Pagination with Search**:
+   - الترقيم والبحث عبر قاعدة البيانات مباشرة (`IQueryable.Skip.Take`) يضمن استجابة فائقة السرعة حتى لو كان لدى الشركة 100,000 عميل.
+3. **Encapsulated Entity Invariants**:
+   - التحقق من عدم فراغ الاسم يتم في قلب الكيان (`Supplier.SetName`) لمنع إدخال بيانات فاسدة من أي مدخل.
+
+---
+
+### 5. What alternatives exist? (ما هي البدائل؟)
+1. **Free-Text Vendor & Customer Names**: كتابة اسم المورد كحقل نصي داخل أمر الشراء بدون جدول مستقل.
+2. **Hard Delete from Database**: تنفيذ `DELETE FROM Suppliers WHERE Id = @Id`.
+3. **Client-Side In-Memory Pagination**: تحميل كل العملاء دفعة واحدة للـ API وعمل ترقيم في الذاكرة.
+
+---
+
+### 6. Why are we NOT using those alternatives here? (لماذا رفضنا البدائل؟)
+- **Free-Text Names**: كارثي للإحصائيات؛ لن تستطيع معرفة إجمالي مبيعات "شركة الأهرام" لو كتبها موظف "الأهرام" وآخر "الاهرام للتجارة".
+- **Hard Delete**: يكسر الـ Foreign Keys الخاصة بـ `PurchaseOrders` و `SalesOrders` ويدمر التقارير المالية والضريبية.
+- **Client-Side Pagination**: يستهلك الذاكرة (RAM) ويؤدي لبطء شديد وسقوط السيرفر مع زيادة أعداد العملاء.
+
+---
+
+### 7. What problem does this approach solve? (ما المشكلة التي يحلها؟)
+- **Duplicate Partner Profiles**: منع تشتت المشتريات والمبيعات عبر ملفات مكررة لنفس المورد أو العميل.
+- **Audit Compliance**: الحفاظ التام على السجلات التاريخية للشركاء التجاريين حتى بعد انتهاء التعامل معهم.
+
+---
+
+### 8. What could go wrong? (ما الذي قد يفشل وكيف نتجنبه؟)
+- **Deactivated Partner Purchase/Sales Order**:
+  - محاولة موظف إصدار أمر شراء لمورد معطل أو أمر بيع لعميل غير نشط.
+  - **الحل الهندسي**: في المرحلة القادمة (أوامر الشراء والبيع)، سنقوم ببرمجة فحص صريح (`supplier.IsActive` و `customer.IsActive`) يرفض فتح أي مسودة إذا كان الشريك التجاري غير نشط.
+
+---
+
+### 9. What should I remember for an interview? (ماذا تقول في الإنترفيو؟)
+> **Interview Question**: "Why do you use Soft Deletes for business entities like Suppliers and Customers instead of Hard Deletes, and how does it affect reporting?"
+>
+> **الإجابة النموذجية**:
+> "In enterprise ERP and WMS architectures, core business entities such as **Suppliers** and **Customers** are permanently anchored to critical financial transactions—specifically `PurchaseOrders`, `SalesOrders`, and stock transaction ledgers. Performing a physical (hard) delete would either violate database referential integrity constraints (`FK violations`) or cause catastrophic cascading data loss, corrupting historical revenue and audit reports.  
+> Instead, we employ **Soft Deletion** by setting `IsActive = false` via dedicated domain methods (`Deactivate()`). Queries exclude inactive partners by default, preventing new transactions from being opened against them, while all historical financial records and analytics remain fully intact and verifiable."
+
+---
+
+
 
 
 
