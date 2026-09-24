@@ -1300,3 +1300,219 @@ purchaseOrder.Status = PurchaseOrderStatus.Received; // استلم بضاعة م
 > 4. **RFC 7807 Global Middleware**: An ASP.NET Core exception handling middleware catches application `ValidationException` and serializes it into standard `ValidationProblemDetails` (HTTP 400), while concurrency conflicts (`DbUpdateConcurrencyException`) map to HTTP 409, missing records to HTTP 404, and unhandled errors to HTTP 500."
 
 ---
+
+## 21. Phase 12: Background Jobs & Scheduled Recurring Tasks with Hangfire (معمارية المعالجة في الخلفية والمهام المجدولة دورياً)
+
+### 1. What was done? (ما الذي تم إنجازه؟)
+1. **Hangfire Infrastructure & Distributed SQL Server Storage**:
+   - دمج محرك الجدولة والمعالجة في الخلفية [`Hangfire`](https://www.hangfire.io/) بالاعتماد على SQL Server كمخزن دائم للوظائف (`Persistent Storage`).
+   - إعداد خادم المعالجة في الخلفية (`Hangfire Server`) مع تحديد عدد المعالجات (`WorkerCount`) وتوزيع قوائم الانتظار بأولويات محددة (`critical`, `default`, `low`).
+2. **Dedicated Background Jobs (الوظائف المجدولة الآلية)**:
+   - **`ILowStockNotifierJob` & `LowStockNotifierJob`**:
+     - وظيفة دورية تعمل كل ساعة (`Cron.Hourly`) تفحص جميع المنتجات النشطة وتحدد المنتجات التي هبط رصيدها المتاح الحر (`AvailableQuantity`) عن حد الأمان الأدنى (`MinimumStockLevel`).
+     - إطلاق تنبيهات تحذيرية مفصلة (`LOW STOCK ALERT`) بحساب العجز المطلوب شراؤه فوراً لتسهيل مهام قسم المشتريات.
+   - **`IStaleOrderCleanupJob` & `StaleOrderCleanupJob`**:
+     - وظيفة دورية تعمل يومياً (`Cron.Daily`) تفحص أوامر البيع المتروكة أو المعلقة لفترات زمنية طويلة (> 24 ساعة للمسودات، > 48 ساعة للأوامر المؤكدة بدون صرف).
+     - إلغاء الأوامر آلياً داخل ترانزاكشن ذرية، مع **فك حجز البضاعة المحبوسة فوراً** (`inventoryItem.ReleaseStock(qty)`) وإعادتها للرصيد المتاح للبيع للعملاء الآخرين.
+   - **`IDailyInventorySnapshotJob` & `DailyInventorySnapshotJob`**:
+     - وظيفة ليلية تعمل يومياً عند الساعة 23:00 UTC لحساب إحصائيات الجرد الكلي والقيمة المالية الإجمالية للبضائع المخزنة (`Inventory Valuation`)، وتوليد سجل تدقيق يومي ثابت للمحاسبة وإدارة المخازن.
+3. **Secured Hangfire Dashboard (`HangfireAuthorizationFilter`)**:
+   - حماية لوحة تحكم Hangfire التفاعلية عبر مسار `/hangfire` بفلتر تفويض أمني صريح يسمح بالوصول المحلي للمطورين (Localhost)، ويشترط صلاحية `Admin` للمستخدمين عن بعد.
+4. **Automated Unit Testing**:
+   - كتابة 6 اختبارات وحدة جديدة في [`HangfireJobsTests.cs`](file:///d:/.NET%20Projects/Warehouse%20&%20Inventory%20Management%20System/tests/WarehouseManagement.UnitTests/Jobs/HangfireJobsTests.cs) تختبر اكتشاف العجز المخزني بدقة، وإلغاء الأوامر المتروكة وفك حجز البضاعة، وحساب تقييم المخزون المالي، وقواعد الأمان في لوحة التحكم.
+   - **الحصيلة الإجمالية للاختبارات**: **122 اختباراً ناجحاً بنسبة 100% (Passed: 122, Failed: 0)** دون أي أخطاء أو تحذيرات.
+
+---
+
+### 2. Why are we doing it? (لماذا نفعل ذلك؟)
+- في تطبيقات الـ Enterprise الحقيقية، لا يمكن الاعتماد على تفاعل المستخدم المباشر عبر الـ HTTP Request/Response لتنفيذ كل شيء!
+- إذا ترك عميل طلباً مؤكداً وذهب دون سداد أو استلام، ستظل البضاعة محجوزة على النظام ولن يتمكن عميل آخر من شرائها.
+- وإذا هبط مخزون منتج رئيسي، لا يمكن انتظار دخول موظف للمستودع لكي يكتشف ذلك بالصدفة؛ بل يجب أن ينبه النظام المسؤولين بصورة استباقية وآلية.
+
+---
+
+### 3. Why is this useful in a real backend? (فائدته في سوق العمل وعالم المشاريع الحقيقية)
+1. **Non-Blocking Distributed Processing**:
+   - نقل العمليات الثقيلة (التحليلات، الإشعارات، معالجة الدفعات) من الـ HTTP Thread Pool إلى Background Workers مستقلة؛ مما يحافظ على سرعة استجابة الـ API للمستخدمين حتى في أوقات الذروة.
+2. **Fault Tolerance & Automatic Retries (المقاومة التلقائية للأعطال)**:
+   - لو تعطل السيرفر أو انقطعت شبكة الداتابيز أثناء تنفيذ وظيفة مجدولة، تحتفظ Hangfire بحالة الوظيفة في SQL Server وتستأنف تنفيذها تلقائياً مع محاولات إعادة ذكية (`Automatic Retry with Exponential Backoff`).
+3. **Zero Zombie Inventory**:
+   - تحرير المخزون المحتجز تلقائياً دون أي تدخل يدوي، مما يرفع كفاءة دوران المخزون (Inventory Turnover) ومبيعات الشركة.
+
+---
+
+### 4. Why did we choose this approach? (لماذا هذا التوجه تحديداً؟)
+1. **Hangfire over IHostedService / BackgroundService**:
+   - `BackgroundService` المدمجة في .NET هي معالجة في الذاكرة (In-Memory) فقط؛ لو أُعيد تشغيل السيرفر أو عمل IIS Recycle، ستضيع كافة الوظائف المجدولة وتختفي للأبد!
+   - `Hangfire` تخزن الوظائف في SQL Server، مما يجعلها قوية، قابلة للتوسع في بيئة Distributed Clusters (عدة سيرفرات تخدم نفس الداتابيز دون تكرار الوظائف)، وتوفر Dashboard تفاعلي رائع لمراقبة الوظائف الفاشلة والناجحة وإعادة تشغيلها بضغطة زر.
+2. **Interface Abstraction in Application Layer**:
+   - وظائف الخلفية (`ILowStockNotifierJob`, `IStaleOrderCleanupJob`) معرفة كـ Interfaces في Application، ومنفذة في Infrastructure؛ تطبيقاً نقياً لـ Clean Architecture.
+
+---
+
+### 5. What alternatives exist? (ما هي البدائل المتاحة؟)
+1. **ASP.NET Core BackgroundService (`IHostedService`)**: تشغيل Tasks دورية داخل حلقة `while (!stoppingToken.IsCancellationRequested)`.
+2. **Quartz.NET**: مكتبة جدولة وظائف مفتوحة المصدر مشهورة في بيئة جافا ودوت نت.
+3. **SQL Server Agent Jobs**: كتابة Stored Procedures وجدولتها عبر SQL Server Agent.
+
+---
+
+### 6. Why are we NOT using those alternatives here? (لماذا رفضنا البدائل؟)
+- **BackgroundService**: لا توفر Persistence، ولا تملك Retry Policy ذكية، ولا لوحة تحكم للمراقبة، ولا تعمل بأمان في بيئة Multi-Instance Server Farm.
+- **Quartz.NET**: ممتازة ولكنها معقدة الإعداد (XML/JobDataMap) وتفتقر للوحة تحكم مدمجة غنية وسهلة مثل Hangfire Dashboard.
+- **SQL Server Agent**: يكسر مبدأ Clean Architecture بنقل منطق الأعمال (Business Logic) وحسابات الدومين من كود C# إلى داخل قاعدة البيانات كـ T-SQL Stored Procedures، مما يصعب اختباره ومراجعته برمجياً.
+
+---
+
+### 7. What problem does this approach solve? (ما المشكلة التي يحلها؟)
+- **Inventory Paralysis (شلل المخزون المتروك)**: استرداد البضاعة المحجوزة آلياً بعد انتهاء المهلة المحددة.
+- **Stock-Out Blindness**: القضاء على المفاجآت غير السارة لنفاد البضاعة عبر التنبيه المستمر قبل نفاد المخزون.
+- **Visibility into Async Tasks**: توفير شفافية كاملة للمديرين والمهندسين عبر Hangfire Dashboard لرؤية أوقات التنفيذ ومعدلات النجاح والفشل.
+
+---
+
+### 8. What could go wrong? (ما الذي قد يفشل وكيف نتجنبه؟)
+1. **Unauthorized Hangfire Dashboard Access**:
+   - ترك مسار `/hangfire` مفتوحاً للعامة يشكل ثغرة أمنية تسمح لأي مخترق بحذف الوظائف أو استعراض أسرار النظام.
+   - **الحل**: قمنا بتأمين المسار عبر [`HangfireAuthorizationFilter`](file:///d:/.NET%20Projects/Warehouse%20&%20Inventory%20Management%20System/src/WarehouseManagement.API/Filters/HangfireAuthorizationFilter.cs) الذي يقفل اللوحة تماماً إلا للمستخدمين المصادقين الحاملين لرتبة `Admin`.
+2. **Deadlocks & Concurrency during Background Sweeps**:
+   - عندما تقوم وظيفة الخلفية بإلغاء أوردر وفك حجز بضاعته في نفس اللحظة التي يحاول فيها أمين المخزن شحن نفس الأوردر.
+   - **الحل**: يتم الإلغاء داخل `IDbContextTransaction` مع الاعتماد على `RowVersion` لاكتشاف التضارب، بحيث ينجح الموظف إذا كان قد شحنه فعلاً وتتراجع وظيفة الخلفية بسلام.
+
+---
+
+### 9. What should I remember for an interview? (ماذا تقول في الإنترفيو؟)
+> **Interview Question**: "Why did you choose Hangfire over .NET BackgroundService for scheduled background jobs, and how do you prevent race conditions during stale order cleanups?"
+>
+> **الإجابة النموذجية**:
+> "We chose **Hangfire** over native `BackgroundService` because enterprise ERP/WMS architectures demand **persistent, distributed job processing with high availability**. Unlike in-memory hosted services, Hangfire persists jobs in SQL Server, providing automatic retries with exponential backoff, cluster-safe coordination (avoiding duplicate job executions across web farms), and real-time dashboard observability.  
+> For state-sensitive tasks like `StaleOrderCleanupJob`, operations execute inside an atomic database transaction (`ACID`). If a stale confirmed order is cancelled, we invoke `inventoryItem.ReleaseStock(qty)` to atomically restore allocations to `AvailableQuantity`. Furthermore, our entities use optimistic concurrency (`RowVersion`), ensuring that if a warehouse clerk dispatches an order concurrently with the background sweep, the conflict is cleanly detected without corrupting inventory balances."
+
+---
+
+## 22. Phase 13: Reporting & Advanced Analytics — Deep Dive
+
+### 1. What did we build? (ماذا بنينا؟)
+
+أضفنا في هذه المرحلة **نظام تقارير وتحليلات متكامل** يتضمن خمسة Endpoints تحليلية متخصصة، كل منها مبني وفق نمط CQRS كـ Query منفصل بـ Handler وDTO مخصص:
+
+| Report | Endpoint | Purpose |
+|---|---|---|
+| **Inventory Valuation** | `GET /api/reports/inventory-valuation` | إجمالي قيمة المخزون لكل مستودع = SUM(Qty × Price) |
+| **Sales Order Summary** | `GET /api/reports/sales-orders` | إيرادات المبيعات وعدد الأوردرات لكل حالة + أفضل 10 عملاء |
+| **Purchase Order Summary** | `GET /api/reports/purchase-orders` | إجمالي المشتريات من الموردين لكل حالة + أفضل 10 موردين |
+| **Top-Selling Products** | `GET /api/reports/top-selling-products` | أكثر المنتجات مبيعاً من أوردرات Completed فقط |
+| **Warehouse Utilization** | `GET /api/reports/warehouse-utilization` | نسبة استخدام كل مستودع مع Low/Out-of-Stock flags |
+
+---
+
+### 2. Architecture & Interfaces (المعمارية والواجهات)
+
+```
+Application Layer
+└── Features/Reports/
+    ├── DTOs/                          ← 5 immutable record DTOs (int IDs matching domain)
+    └── Queries/
+        ├── GetInventoryValuationReport/
+        │   ├── Query.cs    → IRequest<IReadOnlyList<InventoryValuationReportDto>>
+        │   └── Handler.cs
+        ├── GetSalesOrderSummaryReport/
+        │   ├── Query.cs + Handler.cs + Validator.cs
+        ├── GetPurchaseOrderSummaryReport/
+        ├── GetTopSellingProductsReport/
+        └── GetWarehouseUtilizationReport/
+
+API Layer
+└── Controllers/ReportsController.cs   ← Thin, 5 GET actions
+                                          [Authorize(Roles="Admin,WarehouseManager")]
+
+Tests Layer
+└── Features/Reports/ReportQueryHandlerTests.cs ← 19 unit tests (144 total passing)
+```
+
+**Key design decisions:**
+- All Queries implement `IRequest<T>` → automatically intercepted by `ValidationBehavior` + `LoggingBehavior`.
+- Handlers inject only `IApplicationDbContext` — zero infrastructure coupling.
+- DTOs are `sealed record` — immutable, structurally comparable, stack-friendly allocation.
+
+---
+
+### 3. Locking & Concurrency (القفل والتزامن)
+
+التقارير هي **Read-Only operations** — لذلك:
+
+- ✅ **`AsNoTracking()`** في كل Query: يوفر الذاكرة ويسرّع الاستعلامات لأن EF لا يتتبع الكيانات في ChangeTracker.
+- ✅ **لا `BeginTransaction`** في التقارير: القراءة لا تتطلب isolation لأنها لا تعدّل الحالة.
+- ✅ **READ COMMITTED (SQL Server default)**: الاستعلامات تقرأ آخر committed snapshot دون قفل الجداول.
+
+---
+
+### 4. EF Core GroupBy Strategy (استراتيجية الـ GroupBy)
+
+**المشكلة:** EF Core يفشل في ترجمة `GroupBy` بمفتاح يحتوي Navigation Property columns (مثل `Warehouse.Name`) لـ SQL صحيح، خاصة مع InMemory Provider.
+
+```csharp
+// ❌ يفشل مع InMemory أو ينتج SQL معقداً:
+.GroupBy(i => new { i.WarehouseId, i.Warehouse!.Name, i.Warehouse.Location })
+.Select(g => new { g.Key.Name, Total = g.Sum(i => i.Quantity) })
+```
+
+**القرار:** استخدام **Client-Side Grouping Pattern**:
+
+```csharp
+// ✅ الحل المعتمد: Fetch bounded set → Group client-side
+var items = await query.ToListAsync(cancellationToken); // Single SQL round-trip
+var result = items
+    .GroupBy(i => i.WarehouseId)   // Group in C# memory (safe — already filtered)
+    .Select(g => new ReportDto(...))
+    .ToList();
+```
+
+**متى يكون ذلك آمناً؟**
+- عندما يكون الـ Set مُقيَّداً مسبقاً (فلتر WarehouseId، نطاق تاريخ محدود، TopN).
+- التقارير ليست High-Frequency endpoints — يمكن إضافة Response Caching لاحقاً.
+
+---
+
+### 5. "Completed Only" for Top-Selling Products (لماذا Completed فقط؟)
+
+```csharp
+.Where(item => item.SalesOrder!.Status == OrderStatus.Completed && ...)
+```
+
+| Status | المعنى | يُحسب في المبيعات؟ |
+|---|---|---|
+| Pending | لم يُؤكَّد | ❌ |
+| Confirmed | محجوز لكن لم يُشحَن | ❌ |
+| **Completed** | **شُحِن فعلياً** | ✅ |
+| Cancelled | لم تتم | ❌ |
+
+الإحصاء على Completed فقط = **"Units Sold"** الحقيقي، وليس "Units Demanded" المتضخم.
+
+---
+
+### 6. Failures: Approaches that failed and exactly why (ما فشل وليه)
+
+| # | الخطأ | السبب | الحل |
+|---|---|---|---|
+| 1 | `GroupBy` server-side يفشل مع Navigation keys | EF Core InMemory لا يترجم GroupBy بـ Navigation columns | Client-side grouping بعد `ToListAsync()` |
+| 2 | `SalesOrderStatus` does not exist | الـ enum الحقيقي اسمه `OrderStatus` في `WarehouseManagement.Domain.Enums` | استبدال بـ `OrderStatus.Completed` إلخ |
+| 3 | `Operator '==' cannot be applied to 'int' and 'Guid'` | Domain يستخدم `int Id`، الـ DTOs استخدمت `Guid` | إعادة كتابة جميع DTOs والـ Queries بـ `int` |
+| 4 | `Cannot confirm a sales order without items` في الاختبارات | Domain Invariant: `Confirm()` تتحقق من وجود Items | إضافة `Product` + `AddItem()` قبل أي State Transition |
+| 5 | `Cannot approve a purchase order without items` | نفس القاعدة لـ `PurchaseOrder.Approve()` وـ`SubmitForApproval()` | نفس الحل: seed Product ثم `AddItem()` |
+
+---
+
+### 7. What should I remember for an interview? (ماذا تقول في الإنترفيو؟)
+
+> **Interview Question:** "How did you design the reporting layer, and what performance trade-offs did you make?"
+>
+> **الإجابة النموذجية:**
+> "Our reporting layer follows the same CQRS pattern — each report is a dedicated Query with its own Handler, DTO, and FluentValidation Validator. All handlers use `AsNoTracking()` universally since reports are read-only, eliminating EF's change-tracking overhead.
+>
+> For GroupBy aggregations, we chose **client-side grouping** after a single bounded database fetch, because EF Core's SQL GroupBy translation breaks down when group keys include navigation-property column values. Since report queries are always filtered (by warehouse ID, date range, or top-N limit), the in-memory set is small and safe to aggregate in C# — with no N+1 risk.
+>
+> The `TopSellingProducts` report filters to `OrderStatus.Completed` only — not Confirmed — because 'Confirmed' means stock is reserved but not yet physically shipped. Including it would overstate actual sell-through rates.
+>
+> Input parameters like `TopN` (1–100) and `TopCustomersCount` (1–50) are clamped both in FluentValidation and defensively inside the handler with `Math.Clamp()`, preventing unbounded result sets under load."
+
