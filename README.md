@@ -448,4 +448,4 @@ It contains **over 1,500 lines** of detailed architectural explanations, technic
 
 ## 📄 License
 
-This project is licensed under the [MIT License](LICENSE).
+This project was built as part of Digitera Bootcamp
