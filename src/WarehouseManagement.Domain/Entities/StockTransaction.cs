@@ -81,6 +81,28 @@ public class StockTransaction : BaseEntity
         };
     }
 
+    public static StockTransaction CreateAdjustment(int productId, int warehouseId, int quantityDifference, string? referenceId, string? notes, string? createdBy = null)
+    {
+        if (productId <= 0)
+            throw new ArgumentException("Product ID must be greater than zero.", nameof(productId));
+        if (warehouseId <= 0)
+            throw new ArgumentException("Warehouse ID must be greater than zero.", nameof(warehouseId));
+        if (quantityDifference == 0)
+            throw new ArgumentException("Adjustment quantity difference cannot be zero.", nameof(quantityDifference));
+
+        return new StockTransaction
+        {
+            ProductId = productId,
+            WarehouseId = warehouseId,
+            Type = StockTransactionType.Adjustment,
+            Quantity = quantityDifference,
+            ReferenceId = referenceId?.Trim(),
+            Notes = notes?.Trim(),
+            CreatedAt = DateTime.UtcNow,
+            CreatedBy = createdBy
+        };
+    }
+
     private static void ValidateInputs(int productId, int warehouseId, int quantity)
     {
         if (productId <= 0)

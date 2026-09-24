@@ -805,13 +805,109 @@ purchaseOrder.Status = PurchaseOrderStatus.Received; // استلم بضاعة م
 ### 9. What should I remember for an interview? (ماذا تقول في الإنترفيو؟)
 > **Interview Question**: "How do you guarantee stock accuracy and prevent race conditions during warehouse stock operations in high-concurrency systems?"
 >
-> **الإجابة النموذجية**:
 > "We employ a **three-tier defense strategy**:  
 > 1. **Domain Isolation**: Physical quantity and reserved quantity are tracked separately (`AvailableQuantity = Quantity - ReservedQuantity`), and rich domain methods enforce stock sufficiency invariants before mutations.  
 > 2. **Optimistic Concurrency Control (OCC)**: Entities utilize a database-generated `RowVersion` concurrency token. If two operators attempt simultaneous adjustments, EF Core detects the discrepancy and throws `DbUpdateConcurrencyException`, translated by our API middleware to HTTP `409 Conflict`.  
 > 3. **ACID Transactions & Immutable Ledger**: Multi-point operations like inter-warehouse transfers execute inside an explicit `IDbContextTransaction`. Every stock change atomically writes an immutable `StockTransaction` audit log containing the operator's identity, timestamps, and reference identifiers."
 
 ---
+
+## 16. Phase 7: Inventory Management & Stock Operations (إدارة العمليات المخزنية والتحويلات الذرية)
+
+### 1. What was done? (ما الذي تم إنجازه؟)
+1. **Core Stock Mutation Pipeline (دورة حركات المخزون)**:
+   - **`AddStockCommand`**: زيادة رصيد بضاعة في مستودع، وإنشاء سجل `InventoryItem` تلقائياً إذا كان أول تخزين للمنتج، مع إلزامية تسجيل حركة تدقيق من نوع `StockIn` في دفتر الأستاذ (`StockTransaction`).
+   - **`RemoveStockCommand`**: إعدام أو سحب كمية من المستودع، مع استدعاء `item.RemoveStock()` الذي يمنع سحب كمية أكبر من الرصيد المتاح، وتسجيل حركة من نوع `StockOut`.
+   - **`TransferStockCommand`**: نقل بضاعة بين مستودعين بصورة ذرية كاملة (`Atomic ACID Transaction`) عبر `_context.BeginTransactionAsync`. تم حظر التحويل لنفس المستودع عبر `SameWarehouseTransferException` وتسجيل حركة `Transfer`.
+2. **Physical Audit & Cycle Count Adjustment (`AdjustStockCommand`)**:
+   - دعم الجرد الدوري الفعلي للمستودع (`Stocktake / Cycle Count`)؛ حيث يُدخل أمين المستودع الكمية المعدودة فعلياً، ويقوم الـ Handler بحساب الفارق (بالزيادة أو النقص)، مع حظر تقليل الرصيد عن الكميات المحجوزة بالفعل لأوامر بيع معلقة، وتسجيل حركة `Adjustment` تتطلب سبباً إلزامياً (`Mandatory Reason`).
+3. **Order Allocation Pipeline (حجز وإلغاء حجز البضاعة)**:
+   - **`ReserveStockCommand`**: حجز بضاعة لأمر بيع قيد المعالجة (`ReservedQuantity += quantity`) مما يقلل الرصيد المتاح الحر (`AvailableQuantity`) فوراً لمنع بيعها لعميل آخر.
+   - **`ReleaseStockCommand`**: فك حجز البضاعة وإعادتها للرصيد المتاح في حالة إلغاء الأوردر أو انتهاء مهلة الدفع.
+4. **Replenishment & Threshold Query (`GetLowStockProductsQuery`)**:
+   - استعلام يكشف كافة المنتجات التي هبط رصيدها المتاح الإجمالي في جميع المستودعات أو في مستودع معين إلى ما دون أو يساوي الحد الأدنى للأمان (`MinimumStockLevel`)، وحساب كمية العجز المطلوب شراؤها (`DeficitQuantity`) لخدمة نظام التنبيهات ووظائف Hangfire المجدولة.
+5. **RESTful API Exposure (`InventoryController`)**:
+   - `POST /api/inventory/add-stock`
+   - `POST /api/inventory/remove-stock`
+   - `POST /api/inventory/transfer-stock`
+   - `POST /api/inventory/adjust-stock`
+   - `POST /api/inventory/reserve-stock`
+   - `POST /api/inventory/release-stock`
+   - `GET /api/inventory/low-stock`
+   - `GET /api/inventory/transactions`
+   - `GET /api/inventory/product/{productId}`
+6. **Automated Unit Testing**:
+   - إضافة اختبارات شاملة لكافة العمليات، ليصل إجمالي الاختبارات إلى **60 اختباراً ناجحاً بنسبة 100%**.
+
+---
+
+### 2. Why are we doing it? (لماذا نفعل ذلك؟)
+- الأرصدة المخزنية في الشركات ليست أرقاماً ثابتة، بل تتغير كل ثانية نتيجة: استلام شحنات، مبيعات، جرد، تحويلات بين فروع، أو تلفيات.
+- أي نظام WMS يفشل في تقديم حركات ذرية وتتبع دقيق للمخزون المحجوز مقابل المخزون الحر يسبب خسائر مالية بالملايين ويفقد ثقة العملاء بسبب مشكلة **البيع الزائد (Over-selling)**.
+
+---
+
+### 3. Why is this useful in a real backend? (فائدته في سوق العمل)
+- **Cycle Count Adjustments with Mandatory Audit Reason**:
+  - عند الجرد السنوي أو الأسبوعي، لا يمكن تعديل الرقم بصمت! النظام يرفض العملية إذا لم يذكر المدير سبباً صريحاً (مثل: "كسر أثناء النقل"، "فائض استلام سابق"). هذا يحمي الشركة من السرقات والتلاعب.
+- **Stock Reservation (حجز المخزون)**:
+  - عندما يضع العميل طلباً في السلة، يجب حجز البضاعة فوراً دون خصمها نهائياً من المستودع؛ لأن العميل قد لا يكمل الدفع. الحجز يمنع عميلاً ثانياً من شراء نفس القطعة، بينما فك الحجز (`ReleaseStock`) يعيدها للرف تلقائياً إذا أُلغي الطلب.
+
+---
+
+### 4. Why did we choose this approach? (لماذا هذا التوجه تحديداً؟)
+1. **Separation of Physical vs Reserved Stock**:
+   - `Quantity`: إجمالي البضاعة الموجودة فعلياً على الأرفف.
+   - `ReservedQuantity`: البضاعة المربوطة بفواتير قيد التجهيز.
+   - `AvailableQuantity = Quantity - ReservedQuantity`: البضاعة الحرة المتاحة للبيع الفوري.
+2. **Explicit Database Transactions for Transfers**:
+   - النقل بين مستودعين يتطلب تعديل صفين في جدول `InventoryItems` وإضافة صف في `StockTransactions`. وضعها جميعاً داخل `using var tx = await _context.BeginTransactionAsync()` يمنع أي احتمال لضياع البضاعة في منتصف العملية.
+3. **Rich Domain Entities**:
+   - الحسابات والقيود والتحقق من عدم النزول تحت الصفر مفروضة في قلب الـ Domain Entity (`InventoryItem`)، مما يمنع أي ثغرة في الـ API أو الـ Background Jobs.
+
+---
+
+### 5. What alternatives exist? (ما هي البدائل؟)
+1. **Deducting Stock Directly without Reservation**: خصم البضاعة فور إنشاء الأوردر، وإذا أُلغي الأوردر يتم إضافتها يدوياً.
+2. **Non-transactional Multi-step Transfers**: تنفيذ `SaveChangesAsync` لكل مستودع على حدة دون ترانزاكشن موحدة.
+3. **Direct Database Table Updates without Logging**: تعديل حقل `Quantity` دون إنشاء سجل `StockTransaction`.
+
+---
+
+### 6. Why are we NOT using those alternatives here? (لماذا رفضنا البدائل؟)
+- **Direct Deduction**: يربك إدارة المستودع؛ لأن البضاعة ما زالت موجودة فيزيائياً على الرف حتى يتم شحنها، فكيف تكون مخصومة دفترياً؟
+- **Non-transactional Transfers**: في حال انقطاع الاتصال بعد خصم المستودع الأول، ستختفي البضاعة من النظام للأبد (`Data Inconsistency`).
+- **No Audit Logging**: في المحاسبة والقانون التجاري، هذا يعتبر جريمة مالية لأن الحركات المالية والمخزنية يجب أن تكون قابلة للتدقيق (`Auditable`).
+
+---
+
+### 7. What problem does this approach solve? (ما المشكلة التي يحلها؟)
+- **Over-selling & Race Conditions**:
+  - حجز البضاعة مع الـ `RowVersion` يمنع عميلين من حجز نفس القطعة الأخيرة في نفس اللحظة.
+- **Cycle Count Discrepancies**:
+  - تصحيح الفروقات بين الدفاتر والأرفف بطريقة موثقة رسمياً.
+
+---
+
+### 8. What could go wrong? (ما الذي قد يفشل وكيف نتجنبه؟)
+- **Adjustment while Stock is Reserved**:
+  - إذا وجد أمين المخزن 10 قطع فقط بينما الدفتر يقول 20، لكن هناك 15 قطعة محجوزة لأوردرات بالفعل!
+  - **الحل الهندسي**: قمنا ببرمجة فحص صريح يمنع خفض الرصيد إلى ما دون الكمية المحجوزة (`item.AvailableQuantity < unitsToRemove`)، لضمان عدم كسر التزامات الأوردرات المعتمدة.
+- **Unit Testing of ACID Transactions**:
+  - مكتبة EF Core In-Memory لا تدعم الـ Transactions؛ فتم توفير `NoOpTransaction` تلقائي لاختبارات الـ Unit Tests دون تعطيل سلوك SQL Server في البيئة الحية.
+
+---
+
+### 9. What should I remember for an interview? (ماذا تقول في الإنترفيو؟)
+> **Interview Question**: "Explain how you handle stock allocations, cycle count adjustments, and audit integrity in an enterprise Warehouse Management System."
+>
+> **الإجابة النموذجية**:
+> "We separate physical inventory into **Total Physical On-Hand (`Quantity`)** and **Allocated/Reserved Stock (`ReservedQuantity`)**, where customer checkouts reserve inventory via `item.ReserveStock()` without physically removing it from the bins until fulfillment.  
+> Physical audits (cycle counts) are handled via a dedicated `AdjustStockCommand` that calculates the delta, enforces that unreserved stock cannot drop below active commitments, and requires an immutable reason string.  
+> Every adjustment, addition, deduction, or multi-warehouse transfer executes atomically and writes an append-only, immutable `StockTransaction` ledger record capturing operator identity, timestamps, reference document IDs, and transaction types. Furthermore, entities use an optimistic concurrency token (`RowVersion`) to reject conflicting concurrent modifications with HTTP 409 Conflict."
+
+---
+
 
 
 

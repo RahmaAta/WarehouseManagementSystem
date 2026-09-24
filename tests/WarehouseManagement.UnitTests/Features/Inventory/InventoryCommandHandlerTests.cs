@@ -1,7 +1,11 @@
 using Microsoft.EntityFrameworkCore;
 using WarehouseManagement.Application.Features.Inventory.Commands.AddStock;
+using WarehouseManagement.Application.Features.Inventory.Commands.AdjustStock;
+using WarehouseManagement.Application.Features.Inventory.Commands.ReleaseStock;
 using WarehouseManagement.Application.Features.Inventory.Commands.RemoveStock;
+using WarehouseManagement.Application.Features.Inventory.Commands.ReserveStock;
 using WarehouseManagement.Application.Features.Inventory.Commands.TransferStock;
+using WarehouseManagement.Application.Features.Inventory.Queries.GetLowStockProducts;
 using WarehouseManagement.Application.Features.Inventory.Queries.GetProductStock;
 using WarehouseManagement.Application.Features.Inventory.Queries.GetStockTransactions;
 using WarehouseManagement.Domain.Entities;
@@ -336,5 +340,241 @@ public class InventoryCommandHandlerTests
         Assert.NotNull(result);
         Assert.Equal(2, result.TotalCount);
         Assert.Equal(2, result.Items.Count);
+    }
+
+    [Fact]
+    public async Task AdjustStock_PositiveDiscrepancy_ShouldIncreaseQuantityAndRecordAdjustment()
+    {
+        // Arrange
+        using var context = TestDbContextFactory.Create();
+        var category = new Category("Electronics");
+        context.Categories.Add(category);
+
+        var product = new Product("Smart Sensor Node", "IOT-SEN-01", 60m, 10, category.Id);
+        context.Products.Add(product);
+
+        var warehouse = new Warehouse("Cairo Smart Village Hub", "Km 28 Cairo-Alex Desert Rd");
+        context.Warehouses.Add(warehouse);
+        await context.SaveChangesAsync();
+
+        var item = new InventoryItem(warehouse.Id, product.Id, initialQuantity: 40);
+        context.InventoryItems.Add(item);
+        await context.SaveChangesAsync();
+
+        var handler = new AdjustStockCommandHandler(context, _currentUserService);
+        // Actual physical count found 45 units (+5 discrepancy)
+        var command = new AdjustStockCommand(warehouse.Id, product.Id, ActualCountedQuantity: 45, Reason: "Annual stocktake surplus");
+
+        // Act
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        // Assert
+        Assert.Equal(45, result.Quantity);
+        Assert.Equal(45, result.AvailableQuantity);
+
+        var tx = await context.StockTransactions.FirstOrDefaultAsync();
+        Assert.NotNull(tx);
+        Assert.Equal(StockTransactionType.Adjustment, tx.Type);
+        Assert.Equal(5, tx.Quantity);
+        Assert.Equal("Annual stocktake surplus", tx.Notes);
+    }
+
+    [Fact]
+    public async Task AdjustStock_NegativeDiscrepancy_ShouldDecreaseQuantityAndRecordAdjustment()
+    {
+        // Arrange
+        using var context = TestDbContextFactory.Create();
+        var category = new Category("Fasteners");
+        context.Categories.Add(category);
+
+        var product = new Product("Hex Bolt M10", "BLT-HEX-M10", 1.2m, 100, category.Id);
+        context.Products.Add(product);
+
+        var warehouse = new Warehouse("Helwan Logistics", "Helwan Industrial");
+        context.Warehouses.Add(warehouse);
+        await context.SaveChangesAsync();
+
+        var item = new InventoryItem(warehouse.Id, product.Id, initialQuantity: 200);
+        context.InventoryItems.Add(item);
+        await context.SaveChangesAsync();
+
+        var handler = new AdjustStockCommandHandler(context, _currentUserService);
+        // Actual physical count found 190 units (-10 discrepancy)
+        var command = new AdjustStockCommand(warehouse.Id, product.Id, ActualCountedQuantity: 190, Reason: "Cycle count breakage loss");
+
+        // Act
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        // Assert
+        Assert.Equal(190, result.Quantity);
+        Assert.Equal(190, result.AvailableQuantity);
+
+        var tx = await context.StockTransactions.FirstOrDefaultAsync();
+        Assert.NotNull(tx);
+        Assert.Equal(StockTransactionType.Adjustment, tx.Type);
+        Assert.Equal(-10, tx.Quantity);
+    }
+
+    [Fact]
+    public async Task AdjustStock_NegativeDiscrepancyExceedingAvailableStock_ShouldThrowInvalidOperationException()
+    {
+        // Arrange
+        using var context = TestDbContextFactory.Create();
+        var category = new Category("Appliances");
+        context.Categories.Add(category);
+
+        var product = new Product("Air Cooler 50L", "APP-AC-50L", 280m, 5, category.Id);
+        context.Products.Add(product);
+
+        var warehouse = new Warehouse("Alexandria Main Depot", "Smouha");
+        context.Warehouses.Add(warehouse);
+        await context.SaveChangesAsync();
+
+        // Total 20 units, 15 are reserved for orders -> Available = 5
+        var item = new InventoryItem(warehouse.Id, product.Id, initialQuantity: 20);
+        item.ReserveStock(15);
+        context.InventoryItems.Add(item);
+        await context.SaveChangesAsync();
+
+        var handler = new AdjustStockCommandHandler(context, _currentUserService);
+        // Trying to adjust physical count to 10 (deduction of 10), but only 5 are unreserved!
+        var command = new AdjustStockCommand(warehouse.Id, product.Id, ActualCountedQuantity: 10, Reason: "Audit adjustment");
+
+        // Act & Assert
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            handler.Handle(command, CancellationToken.None));
+
+        Assert.Contains("currently reserved for pending orders", ex.Message);
+    }
+
+    [Fact]
+    public async Task ReserveStock_WithSufficientAvailableStock_ShouldIncreaseReservedQuantityAndDecreaseAvailable()
+    {
+        // Arrange
+        using var context = TestDbContextFactory.Create();
+        var category = new Category("Packaging");
+        context.Categories.Add(category);
+
+        var product = new Product("Packing Peanuts 10kg", "PKG-PNT-10", 30m, 10, category.Id);
+        context.Products.Add(product);
+
+        var warehouse = new Warehouse("Obour City Warehouse", "Industrial Zone B");
+        context.Warehouses.Add(warehouse);
+        await context.SaveChangesAsync();
+
+        var item = new InventoryItem(warehouse.Id, product.Id, initialQuantity: 50);
+        context.InventoryItems.Add(item);
+        await context.SaveChangesAsync();
+
+        var handler = new ReserveStockCommandHandler(context);
+        var command = new ReserveStockCommand(warehouse.Id, product.Id, Quantity: 20);
+
+        // Act
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        // Assert
+        Assert.Equal(50, result.Quantity); // Total physical stock remains 50
+        Assert.Equal(20, result.ReservedQuantity); // 20 units reserved
+        Assert.Equal(30, result.AvailableQuantity); // Only 30 available for other orders
+    }
+
+    [Fact]
+    public async Task ReserveStock_ExceedingAvailableQuantity_ShouldThrowInsufficientStockException()
+    {
+        // Arrange
+        using var context = TestDbContextFactory.Create();
+        var category = new Category("Tools");
+        context.Categories.Add(category);
+
+        var product = new Product("Impact Drill", "TOOL-ID-01", 110m, 5, category.Id);
+        context.Products.Add(product);
+
+        var warehouse = new Warehouse("Delta Depot", "Mahalla");
+        context.Warehouses.Add(warehouse);
+        await context.SaveChangesAsync();
+
+        var item = new InventoryItem(warehouse.Id, product.Id, initialQuantity: 10);
+        context.InventoryItems.Add(item);
+        await context.SaveChangesAsync();
+
+        var handler = new ReserveStockCommandHandler(context);
+        var command = new ReserveStockCommand(warehouse.Id, product.Id, Quantity: 15); // Exceeds available 10
+
+        // Act & Assert
+        await Assert.ThrowsAsync<InsufficientStockException>(() =>
+            handler.Handle(command, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ReleaseStock_WithSufficientReservedStock_ShouldDecreaseReservedAndIncreaseAvailable()
+    {
+        // Arrange
+        using var context = TestDbContextFactory.Create();
+        var category = new Category("Office");
+        context.Categories.Add(category);
+
+        var product = new Product("A4 Paper Ream", "OFF-PPR-A4", 6.5m, 100, category.Id);
+        context.Products.Add(product);
+
+        var warehouse = new Warehouse("Cairo Center", "Downtown");
+        context.Warehouses.Add(warehouse);
+        await context.SaveChangesAsync();
+
+        var item = new InventoryItem(warehouse.Id, product.Id, initialQuantity: 100);
+        item.ReserveStock(30);
+        context.InventoryItems.Add(item);
+        await context.SaveChangesAsync();
+
+        var handler = new ReleaseStockCommandHandler(context);
+        var command = new ReleaseStockCommand(warehouse.Id, product.Id, Quantity: 10);
+
+        // Act
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        // Assert
+        Assert.Equal(100, result.Quantity);
+        Assert.Equal(20, result.ReservedQuantity); // Reserved dropped from 30 to 20
+        Assert.Equal(80, result.AvailableQuantity); // Available rose from 70 to 80
+    }
+
+    [Fact]
+    public async Task GetLowStockProductsQuery_ShouldIdentifyProductsBelowMinimumThreshold()
+    {
+        // Arrange
+        using var context = TestDbContextFactory.Create();
+        var category = new Category("Industrial Components");
+        context.Categories.Add(category);
+
+        // Product 1: Min = 50, Stock = 30 -> LOW STOCK (Deficit = 20)
+        var p1 = new Product("Hydraulic Valve", "HYD-VLV-01", 150m, minimumStockLevel: 50, category.Id);
+        // Product 2: Min = 10, Stock = 100 -> HEALTHY STOCK
+        var p2 = new Product("Rubber Gasket", "GSK-RBR-01", 2m, minimumStockLevel: 10, category.Id);
+        context.Products.AddRange(p1, p2);
+
+        var warehouse = new Warehouse("Main Logistics Base", "10th Ramadan");
+        context.Warehouses.Add(warehouse);
+        await context.SaveChangesAsync();
+
+        context.InventoryItems.AddRange(
+            new InventoryItem(warehouse.Id, p1.Id, initialQuantity: 30),
+            new InventoryItem(warehouse.Id, p2.Id, initialQuantity: 100)
+        );
+        await context.SaveChangesAsync();
+
+        var handler = new GetLowStockProductsQueryHandler(context);
+        var query = new GetLowStockProductsQuery();
+
+        // Act
+        var result = await handler.Handle(query, CancellationToken.None);
+
+        // Assert
+        Assert.NotNull(result);
+        Assert.Single(result);
+        var lowStockItem = result.First();
+        Assert.Equal(p1.Id, lowStockItem.ProductId);
+        Assert.Equal("Hydraulic Valve", lowStockItem.ProductName);
+        Assert.Equal(50, lowStockItem.MinimumStockLevel);
+        Assert.Equal(30, lowStockItem.TotalAvailableStock);
+        Assert.Equal(20, lowStockItem.DeficitQuantity);
     }
 }

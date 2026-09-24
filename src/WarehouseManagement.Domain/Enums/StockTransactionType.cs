@@ -7,5 +7,6 @@ public enum StockTransactionType
 {
     StockIn = 1,
     StockOut = 2,
-    Transfer = 3
+    Transfer = 3,
+    Adjustment = 4
 }

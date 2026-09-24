@@ -3,9 +3,13 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using WarehouseManagement.Application.Common.Models;
 using WarehouseManagement.Application.Features.Inventory.Commands.AddStock;
+using WarehouseManagement.Application.Features.Inventory.Commands.AdjustStock;
+using WarehouseManagement.Application.Features.Inventory.Commands.ReleaseStock;
 using WarehouseManagement.Application.Features.Inventory.Commands.RemoveStock;
+using WarehouseManagement.Application.Features.Inventory.Commands.ReserveStock;
 using WarehouseManagement.Application.Features.Inventory.Commands.TransferStock;
 using WarehouseManagement.Application.Features.Inventory.DTOs;
+using WarehouseManagement.Application.Features.Inventory.Queries.GetLowStockProducts;
 using WarehouseManagement.Application.Features.Inventory.Queries.GetProductStock;
 using WarehouseManagement.Application.Features.Inventory.Queries.GetStockTransactions;
 
@@ -100,6 +104,73 @@ public class InventoryController : ControllerBase
     public async Task<IActionResult> TransferStock([FromBody] TransferStockCommand command)
     {
         var result = await _mediator.Send(command);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Adjust inventory to an actual physical count following an audit or stocktake.
+    /// Requires Admin or WarehouseManager role.
+    /// </summary>
+    [HttpPost("adjust-stock")]
+    [Authorize(Roles = "Admin,WarehouseManager")]
+    [ProducesResponseType(typeof(InventoryItemDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> AdjustStock([FromBody] AdjustStockCommand command)
+    {
+        var result = await _mediator.Send(command);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Reserve stock units for pending order allocation.
+    /// Permitted for Admin, WarehouseManager, and WarehouseStaff roles.
+    /// </summary>
+    [HttpPost("reserve-stock")]
+    [Authorize(Roles = "Admin,WarehouseManager,WarehouseStaff")]
+    [ProducesResponseType(typeof(InventoryItemDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> ReserveStock([FromBody] ReserveStockCommand command)
+    {
+        var result = await _mediator.Send(command);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Release previously reserved stock units back to available inventory.
+    /// Permitted for Admin, WarehouseManager, and WarehouseStaff roles.
+    /// </summary>
+    [HttpPost("release-stock")]
+    [Authorize(Roles = "Admin,WarehouseManager,WarehouseStaff")]
+    [ProducesResponseType(typeof(InventoryItemDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> ReleaseStock([FromBody] ReleaseStockCommand command)
+    {
+        var result = await _mediator.Send(command);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Retrieve products that are currently below or at their minimum stock threshold.
+    /// Ideal for replenishment alerts and procurement.
+    /// </summary>
+    [HttpGet("low-stock")]
+    [Authorize]
+    [ProducesResponseType(typeof(List<LowStockProductDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetLowStock([FromQuery] int? warehouseId = null)
+    {
+        var result = await _mediator.Send(new GetLowStockProductsQuery(warehouseId));
         return Ok(result);
     }
 }
