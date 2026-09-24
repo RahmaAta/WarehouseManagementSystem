@@ -1,7 +1,6 @@
 using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
-using Microsoft.OpenApi.Models;
 using Scalar.AspNetCore;
 using WarehouseManagement.API.Services;
 using WarehouseManagement.Application;
@@ -46,51 +45,19 @@ builder.Services.AddAuthentication(options =>
 builder.Services.AddAuthorization();
 
 builder.Services.AddControllers();
-builder.Services.AddEndpointsApiExplorer();
 
-// 4. Configure OpenAPI document generation with Bearer Authentication support
-builder.Services.AddSwaggerGen(options =>
-{
-    options.SwaggerDoc("v1", new OpenApiInfo { Title = "Warehouse Management API", Version = "v1" });
-
-    options.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
-    {
-        Name = "Authorization",
-        Type = SecuritySchemeType.Http,
-        Scheme = "Bearer",
-        BearerFormat = "JWT",
-        In = ParameterLocation.Header,
-        Description = "Enter your JWT Bearer token."
-    });
-
-    options.AddSecurityRequirement(new OpenApiSecurityRequirement
-    {
-        {
-            new OpenApiSecurityScheme
-            {
-                Reference = new OpenApiReference
-                {
-                    Type = ReferenceType.SecurityScheme,
-                    Id = "Bearer"
-                }
-            },
-            Array.Empty<string>()
-        }
-    });
-});
+// 4. Configure native .NET OpenAPI specification
+builder.Services.AddOpenApi();
 
 var app = builder.Build();
 
 // Configure OpenAPI & Scalar API reference documentation
 if (app.Environment.IsDevelopment())
 {
-    // Generate OpenAPI json document specification
-    app.UseSwagger(options =>
-    {
-        options.RouteTemplate = "openapi/{documentName}.json";
-    });
+    // Native .NET OpenAPI endpoint (/openapi/v1.json)
+    app.MapOpenApi();
 
-    // Map Scalar Interactive API Explorer at /scalar
+    // Scalar Interactive API Explorer (/scalar)
     app.MapScalarApiReference(options =>
     {
         options.WithTitle("Warehouse & Inventory Management API")
