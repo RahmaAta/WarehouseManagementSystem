@@ -997,6 +997,103 @@ purchaseOrder.Status = PurchaseOrderStatus.Received; // استلم بضاعة م
 
 ---
 
+## 18. Purchase Orders Lifecycle Flow (دورة حياة أوامر الشراء والتوريد)
+
+### 1. What was done? (ما الذي تم إنجازه؟)
+1. **Purchase Order State Machine (آلة حالات أوامر الشراء)**:
+   - تمكين دورة الحياة المعتمدة في أنظمة سلاسل الإمداد المؤسسية:
+     $$\text{Draft} \longrightarrow \text{PendingApproval} \longrightarrow \text{Approved} \longrightarrow \text{Received} \quad (\text{or } \text{Cancelled})$$
+2. **Commands & Handlers Separation (فصل الأوامر عن المعالجات)**:
+   - **`CreatePurchaseOrderCommand`**: إنشاء مسودة أمر شراء في حالة `Draft` مع التحقق من نشاط المورد (`supplier.IsActive`) وصلاحية المستودع المستهدف (`warehouse.IsActive`) ومنع تكرار أي صنف داخل بنود الأمر، مع توليد تلقائي للرقم الفريد `OrderNumber`.
+   - **`SubmitPurchaseOrderCommand`**: تحويل المسودة إلى `PendingApproval` ومنع إرسال أمر خالي من الأصناف.
+   - **`ApprovePurchaseOrderCommand`**: اعتماد أمر الشراء من قبل الإدارة وتسجيل اسم المعتمد وتوقيت الاعتماد.
+   - **`ReceivePurchaseOrderCommand`**: استلام البضائع ذرياً داخل `ACID Database Transaction`:
+     - زيادة الرصيد الفعلي في جدول المخزون (`InventoryItems`) للمستودع المستهدف.
+     - تحديث كمية الاستلام الفعلية على بنود أمر الشراء (`item.RecordReceivedQuantity`).
+     - تسجيل حركة توريد غير قابلة للتعديل في دفتر التدقيق المحاسبي (`StockTransaction.CreateStockIn`).
+     - تسجيل توقيت الاستلام ومأمور الاستلام (`ReceivedBy`).
+   - **`CancelPurchaseOrderCommand`**: إلغاء أمر الشراء مع حظر الإلغاء إذا كانت الشحنة قد تم استلامها بالفعل وتخزينها في المستودع.
+3. **Queries (استعلامات أوامر الشراء)**:
+   - **`GetPurchaseOrdersQuery`**: استعلام مرقم (`PaginatedList<PurchaseOrderDto>`) مع فلاتر حسب الحالة (`Status`)، والمورد (`SupplierId`)، والمستودع (`WarehouseId`)، والبحث بالرقم واسم المورد.
+   - **`GetPurchaseOrderByIdQuery`**: استعلام تفصيلي لبنود أمر الشراء وأسعار التوريد وأسماء المستودعات والشركاء.
+4. **RESTful API Controller with RBAC**:
+   - بناء `PurchaseOrdersController` وتأمينه بصلاحيات دقيقة:
+     - إنشاء المسودات والاعتماد والإلغاء: `[Authorize(Roles = "Admin,WarehouseManager")]`.
+     - تقديم الطلب واستلام البضاعة بالمخزن: `[Authorize(Roles = "Admin,WarehouseManager,WarehouseStaff")]`.
+5. **Automated Unit Testing**:
+   - إضافة 13 اختبار وحدة جديد في `PurchaseOrdersCommandHandlerTests` لتغطية كافة انتقالات الحالات والعمليات الذرية وقيود الموردين والمستودعات.
+   - **الحصيلة الإجمالية للاختبارات**: **87 اختباراً ناجحاً بنسبة 100% (Passed: 87, Failed: 0)**.
+
+---
+
+### 2. Why are we doing it? (لماذا نفعل ذلك؟)
+- في بيئة المستودعات والمصانع الحقيقية، لا يمكن للبضائع أن تدخل المخزن "من العدم" أو بضغطة زر عشوائية؛ لأن كل كرتونة تدخل المخزن يترتب عليها **التزام مالي (Accounts Payable)** تجاه المورد الخارجي.
+- أمر الشراء (`Purchase Order`) هو الوثيقة القانونية والمالية التي تربط قسم المشتريات بالمخازن والمحاسبة، وتحدد كميات وأسعار الأصناف المتفق عليها قبل وصول الشاحنات إلى أرصفة الاستلام (Receiving Docks).
+
+---
+
+### 3. Why is this useful in a real backend? (فائدته في سوق العمل وعالم المشاريع الحقيقية)
+1. **Separation of Duties (SoD - الفصل بين الاختصاصات)**:
+   - موظف المخزن (`WarehouseStaff`) قد يقترح طلب بضاعة، لكنه لا يملك الصلاحية المالية لاعتمادها (`Admin/WarehouseManager` فقط).
+   - المدير المالي يعتمد التكلفة، لكنه لا يستلم الشحنة بيده؛ موظف الرصيف هو من يفحص البضاعة الفيزيائية ويستلمها.
+2. **Defensive Financial Auditing**:
+   - تسجيل سعر الوحدة المتفق عليه (`UnitPrice`) داخل أمر الشراء يمنع أي تلاعب في فواتير الموردين لاحقاً، ويوفر الأساس لحساب تكلفة المخزون ومتوسط التكلفة المرجح (Weighted Average Cost).
+
+---
+
+### 4. Why did we choose this approach? (لماذا هذا التوجه تحديداً؟)
+1. **Rich Domain State Machine (حماية الحالة في قلب الدومين)**:
+   - منع الانتقال غير الشرعي بين الحالات داخل الـ Entity مباشرة (`po.MarkAsReceived` ترفض الاستلام إلا إذا كان `Status == Approved`).
+2. **Atomic Inbound Inventory Mutation (الاستلام الذري)**:
+   - عملية استلام البضائع تفتح `BeginTransactionAsync`. فلو افترضنا أن أمر الشراء يحتوي على 10 أصناف، وحدث خطأ في الصنف رقم 8 (مثل قفل على الجدول أو خطأ بالذاكرة)، تتراجع قاعدة البيانات بالكامل (`Rollback`). يستحيل أن نجد 7 أصناف دخلت المخزن و3 أصناف تائهة.
+3. **Append-Only Ledger Trail**:
+   - كل استلام يولد سجلاً في `StockTransactions` يحمل `ReferenceId` مطابقاً لرقم أمر الشراء واسم الموظف الذي استلم البضاعة في الموقع.
+
+---
+
+### 5. What alternatives exist? (ما هي البدائل المتاحة؟)
+1. **Direct Stock Increase Endpoint**: أن يقوم موظف المخزن بالضغط على `AddStock` كلما جاءت سيارة نقل بدون أمر شراء.
+2. **Unregulated Immediate Fulfillment**: إنشاء أمر الشراء واستلامه فوراً في نفس اللحظة بدون دورة اعتماد ومسودات.
+3. **Non-Transactional Multi-Item Loops**: تنفيذ `foreach (var item in po.Items)` وحفظ التعديلات خارج Transaction صريحة.
+
+---
+
+### 6. Why are we NOT using those alternatives here? (لماذا رفضنا البدائل؟)
+- **Direct Stock Increase**: كارثة أمنية ومحاسبية؛ تفتح الباب للسرقة والتلاعب ولا توفر أي وثيقة تثبت من طلب البضاعة وبأي تكلفة.
+- **Immediate Fulfillment**: يتنافى مع الواقع؛ فالشحنات تستغرق أياماً أو أسابيع بين توقيع أمر الشراء ووصول البضاعة من مصنع المورد.
+- **Non-Transactional Loops**: تؤدي إلى تلف البيانات (Partial Inconsistent State) في حال حدوث انقطاع للاتصال أثناء معالجة الشحنات الكبيرة.
+
+---
+
+### 7. What problem does this approach solve? (ما المشكلة التي يحلها؟)
+- **Ghost Inventory & Unverified Inbound**: القضاء على البضاعة الوهمية؛ لا يدخل المخزن سوى ما تم اعتماده مسبقاً من الإدارة.
+- **Supplier Over-billing**: منع المحاسبة من دفع فواتير أصناف لم يتم استلامها فعلياً على أرصفة التنزيل.
+
+---
+
+### 8. What could go wrong? (ما الذي قد يفشل وكيف نتجنبه؟)
+1. **Receiving against Cancelled or Unapproved Order**:
+   - محاولة استلام أمر شراء ملغي أو ما زال في مرحلة المسودة.
+   - **الحل**: اعتراض العملية فوراً عبر `InvalidOrderStateException` المدمجة في منطق الكيان `PurchaseOrder`.
+2. **Receiving into a Deactivated Warehouse**:
+   - محاولة تنزيل الشحنة في مستودع تم إيقاف نشاطه.
+   - **الحل**: فحص `warehouse.IsActive` قبل فتح المعاملة ورفض العملية مع رسالة توضيحية.
+3. **Cancelling Already Received Orders**:
+   - محاولة إلغاء أمر تم استلام بضاعته وصرفها للعملاء بالفعل.
+   - **الحل**: حظر الإلغاء عبر فحص `if (Status == PurchaseOrderStatus.Received) throw new InvalidOperationException(...)`.
+
+---
+
+### 9. What should I remember for an interview? (ماذا تقول في الإنترفيو؟)
+> **Interview Question**: "Walk me through how you architected the Inbound Purchase Order lifecycle, and how you guarantee transactional integrity during warehouse receiving."
+>
+> **الإجابة النموذجية**:
+> "We implemented a strict, encapsulated Domain State Machine governing the Purchase Order lifecycle: `Draft` ➡️ `PendingApproval` ➡️ `Approved` ➡️ `Received` (or `Cancelled`).  
+> Creation and updates validate partner active status and forbid duplicate product lines. Managerial approval is safeguarded via RBAC (`Admin` and `WarehouseManager` roles).  
+> When goods arrive at the docks, the `ReceivePurchaseOrderCommand` executes within an atomic database transaction (`ACID`): it verifies the approved state, increments warehouse physical quantities in `InventoryItems`, records received quantities per line, and generates append-only `StockIn` ledger records in `StockTransactions` tracking the order number and receiving clerk. If any line operation fails, the transaction rolls back entirely, ensuring zero ledger discrepancies."
+
+---
+
 
 
 
