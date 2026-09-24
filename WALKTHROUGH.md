@@ -1201,3 +1201,102 @@ purchaseOrder.Status = PurchaseOrderStatus.Received; // استلم بضاعة م
 
 ---
 
+## 20. Phase 11: Cross-Cutting Concerns, Pipeline Behaviors & Centralized Validation (معمارية خطوط المعالجة والتحقق المركزي وإدارة الأخطاء)
+
+### 1. What was done? (ما الذي تم إنجازه؟)
+1. **MediatR Pipeline Behaviors (سلسلة سلوكيات خط المعالجة)**:
+   - بناء خط معالجة معترض للطلبات (`Request Interception Pipeline`) ينفذ الاهتمامات المشتركة تلقائياً بالترتيب الهندسي الصحيح:
+     $$\text{Incoming Request} \longrightarrow \text{LoggingBehavior} \longrightarrow \text{PerformanceBehavior} \longrightarrow \text{ValidationBehavior} \longrightarrow \text{RequestHandler}$$
+   - **`LoggingBehavior<TRequest, TResponse>`**: تسجيل بدء تنفيذ الطلب واسم الـ Command/Query وهوية المستخدم المشغل وتوقيت الانتهاء، وتسجيل الأخطاء عند التعثر.
+   - **`PerformanceBehavior<TRequest, TResponse>`**: مراقبة أزمنة التنفيذ بدقة بالميلي ثانية عبر `Stopwatch`، وإطلاق تحذير `Long Running Request Detected` في حال تجاوز الطلب الحد المقبول (500ms).
+   - **`ValidationBehavior<TRequest, TResponse>`**: اعتراض أي طلب وارد والبحث التلقائي عن كافة الـ Validators المسجلة له في مكتبة `FluentValidation`، وتجميع كافة الأخطاء الحقلية ورمي استثناء `ValidationException` دفعة واحدة قبل وصول أي بيانات غير صالحة للـ Handler أو قاعدة البيانات.
+2. **Centralized Application Validation Exception**:
+   - بناء كلاس [`ValidationException`](file:///d:/.NET%20Projects/Warehouse%20&%20Inventory%20Management%20System/src/WarehouseManagement.Application/Common/Exceptions/ValidationException.cs) في طبقة Application يحمل قاموس أخطاء مجمع `IDictionary<string, string[]> Errors` مفهرس باسم كل خاصية غير صالحة.
+3. **Comprehensive FluentValidation Suite (حزمة التحقق المتكاملة لكافة العمليات)**:
+   - بناء قواعد تحقق احترافية تغطي كافة ميزات النظام:
+     - `RegisterUserCommandValidator`, `LoginCommandValidator`
+     - `CreateCategoryCommandValidator`, `UpdateCategoryCommandValidator`
+     - `CreateProductCommandValidator`, `UpdateProductCommandValidator` (SKU Regex, أسعار غير سالبة، حد أمان أدنى)
+     - `CreateWarehouseCommandValidator`, `UpdateWarehouseCommandValidator`
+     - `CreateSupplierCommandValidator`, `UpdateSupplierCommandValidator`
+     - `CreateCustomerCommandValidator`, `UpdateCustomerCommandValidator`
+     - `AddStockCommandValidator`, `RemoveStockCommandValidator`, `TransferStockCommandValidator`, `AdjustStockCommandValidator`, `ReserveStockCommandValidator`, `ReleaseStockCommandValidator`
+     - `CreatePurchaseOrderCommandValidator`, `CreateSalesOrderCommandValidator` (التحقق من بنود الطلب والأسعار والكميات)
+4. **RFC 7807 ProblemDetails Global Error Handling (`ExceptionHandlingMiddleware`)**:
+   - تحديث الميدلوير المركزي لاعتراض `ValidationException` وتحويله تلقائياً إلى استجابة معيارية HTTP 400 Bad Request بصيغة `ValidationProblemDetails` تحتوي على مصفوفة الأخطاء الحقلية مفهرسة، بما يتوافق مع معايير الـ RESTful API العالمية.
+5. **Automated Unit Testing**:
+   - إضافة 17 اختبار وحدة جديد تغطي:
+     - سلوكيات `ValidationBehaviorTests`, `LoggingBehaviorTests`, `PerformanceBehaviorTests`
+     - اختبارات فحص المدخلات `CommandValidatorsTests`
+     - اختبارات استجابات الميدلوير `ExceptionHandlingMiddlewareTests` (400 ProblemDetails, 404 NotFound, 409 Conflict, 500 ServerError).
+   - **الحصيلة الإجمالية للاختبارات**: **116 اختباراً ناجحاً بنسبة 100% (Passed: 116, Failed: 0)**.
+
+---
+
+### 2. Why are we doing it? (لماذا نفعل ذلك؟)
+- في المشاريع الصغيرة أو الكود الضعيف، يقوم المطور بكتابة `if (string.IsNullOrEmpty(request.Name))` داخل كل Handler أو Controller، ويكتب سطور `_logger.LogInformation` و `stopwatch.Start()` مكررة في عشرات الأماكن!
+- هذا التكرار يخالف مبدأ **DRY (Don't Repeat Yourself)** ويجعل الكود عرضة للأخطاء والنسيان.
+- باستخدام **MediatR Pipeline Behaviors**، نطبق مبدأ **Separation of Concerns (SoC)**؛ حيث تتفرغ الـ Handlers لكتابة منطق الأعمال الصافي (Pure Business Logic)، بينما تتولى الـ Pipelines مهام التحقق والمراقبة والـ Logging بصورة مركزية شفافة.
+
+---
+
+### 3. Why is this useful in a real backend? (فائدته في سوق العمل وعالم المشاريع الحقيقية)
+1. **Zero-Boilerplate Clean Handlers**:
+   - لا يحتاج الـ Handler لفحص صحة البريد أو صيغة الـ SKU؛ إذا وصل الطلب إلى الـ Handler فهو مضمون بنسبة 100% أنه خضع للفحص واجتاز كافة القواعد.
+2. **Standardized Frontend Error Contract (RFC 7807 ProblemDetails)**:
+   - مطورو الـ Frontend (React / Angular / Flutter) يعانون عندما ترجع كل شاشة خطأ بصيغة مختلفة. توحيد الأخطاء عبر `ValidationProblemDetails` يمكنهم من إضاءة حقول الإدخال الحمراء تحت كل Input في واجهة المستخدم تلقائياً بناءً على مفاتيح الأخطاء.
+3. **Telemetry & Production Bottleneck Detection**:
+   - تنبيهات `PerformanceBehavior` تنبه مهندسي الـ DevOps والـ Backend إلى الاستعلامات والعمليات البطيئة في الـ Logs فور حدوثها في بيئة الإنتاج قبل أن يشتكي العملاء.
+
+---
+
+### 4. Why did we choose this approach? (لماذا هذا التوجه تحديداً؟)
+1. **MediatR Pipeline Behaviors over ASP.NET ActionFilters**:
+   - الـ ActionFilters تعمل فقط على مستوى HTTP Controllers. أما MediatR Behaviors فتعمل في طبقة الـ Application؛ مما يعني أنها تعمل تلقائياً حتى لو تم استدعاء الـ Commands من Background Jobs (مثل Hangfire) أو Message Queues (مثل RabbitMQ) أو gRPC أو Integration Tests دون الحاجة لـ HTTP Context!
+2. **FluentValidation Assembly Scanning**:
+   - استخدام `services.AddValidatorsFromAssembly()` يضمن تسجيل أي Validator جديد يتم إنشاؤه في المستقبل تلقائياً دون كتابة سطر واحد في الـ DI Container.
+
+---
+
+### 5. What alternatives exist? (ما هي البدائل المتاحة؟)
+1. **Data Annotations Attributes** (`[Required]`, `[MaxLength]` على مستوى الـ DTOs).
+2. **Manual `if` conditions in Handlers**: التحقق اليدوي في بداية كل دالة معالجة.
+3. **ASP.NET Core Action Filters**: استخدام `ActionFilterAttribute` لفحص `ModelState.IsValid`.
+
+---
+
+### 6. Why are we NOT using those alternatives here? (لماذا رفضنا البدائل؟)
+- **Data Annotations**: تمزج تعريف البيانات بقواعد التحقق، وتفتقر للمرونة؛ لا تدعم الشروط المعقدة (مثل: فحص التساوي بين مستودعين `NotEqual(x => x.FromWarehouseId)` أو التحقق الفرعي المتسلسل `RuleForEach`).
+- **Manual Handlers Validation**: ينتهك Clean Architecture و Single Responsibility Principle؛ يضخم الـ Handlers بكود دفاعي رتيب وممل ويزيد احتمالية السهو.
+- **ASP.NET Action Filters**: مقيدة ببروتوكول HTTP؛ لا تعمل مع أحداث الخلفية ولا مع مشغلات الرسائل (Message Handlers) وتجعل طبقة الـ Application معتمدة على ASP.NET Core MVC.
+
+---
+
+### 7. What problem does this approach solve? (ما المشكلة التي يحلها؟)
+- **Defensive Pollution**: تنقية منطق التطبيق من آلاف أسطر التحقق الدفاعية الرتيبة.
+- **Inconsistent Error Responses**: القضاء التام على الاستجابات العشوائية للأخطاء، وضمان صدور استجابات RFC 7807 موحدة لكافة أنواع الاستثناءات (400, 404, 409, 500).
+- **Silent Degradation**: حماية التطبيق من البطء الصامت عبر المراقبة المستمرة لأزمنة التنفيذ.
+
+---
+
+### 8. What could go wrong? (ما الذي قد يفشل وكيف نتجنبه؟)
+1. **Pipeline Ordering Bugs**:
+   - لو وُضعت الـ `ValidationBehavior` قبل `LoggingBehavior`، فإن أي خطأ في التحقق لن يتم تسجيله في الـ Logs!
+   - **الحل**: ترتيب خط المعالجة بدقة: `Logging ➡️ Performance ➡️ Validation ➡️ Handler`.
+2. **High Memory Overhead from Reflection**:
+   - استدعاء reflection في كل طلب لفحص الـ Validators يسبب بطء استجابة.
+   - **الحل**: حقن `IEnumerable<IValidator<TRequest>>` مباشرة عبر الـ DI Container، حيث يتم اكتشاف الـ Validators مرة واحدة عند إقلاع التطبيق (Startup/Cold Start) وحقنها كـ Scoped Dependencies بسرعة فائقة.
+
+---
+
+### 9. What should I remember for an interview? (ماذا تقول في الإنترفيو؟)
+> **Interview Question**: "How do you handle Cross-Cutting Concerns like Validation, Logging, and Error Handling in a Clean Architecture CQRS application?"
+>
+> **الإجابة النموذجية**:
+> "We leverage **MediatR Pipeline Behaviors** to execute cross-cutting concerns orthogonally across our Application layer:  
+> 1. **LoggingBehavior**: Intercepts requests, logs execution boundaries, and captures ambient user context from `ICurrentUserService`.  
+> 2. **PerformanceBehavior**: Employs high-precision timing via `Stopwatch` and raises structured warnings whenever request execution exceeds our SLA threshold (500ms).  
+> 3. **ValidationBehavior**: Pre-emptively resolves all registered `IValidator<TRequest>` instances via FluentValidation assembly scanning. If any invariant is violated, it throws a custom `ValidationException` aggregating all property errors without invoking the underlying handler.  
+> 4. **RFC 7807 Global Middleware**: An ASP.NET Core exception handling middleware catches application `ValidationException` and serializes it into standard `ValidationProblemDetails` (HTTP 400), while concurrency conflicts (`DbUpdateConcurrencyException`) map to HTTP 409, missing records to HTTP 404, and unhandled errors to HTTP 500."
+
+---

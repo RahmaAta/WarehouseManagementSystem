@@ -2,6 +2,7 @@ using System.Net;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using WarehouseManagement.Application.Common.Exceptions;
 using WarehouseManagement.Domain.Exceptions;
 
 namespace WarehouseManagement.API.Middlewares;
@@ -45,6 +46,23 @@ public class ExceptionHandlingMiddleware
 
         switch (exception)
         {
+            case ValidationException ex:
+                response.StatusCode = (int)HttpStatusCode.BadRequest;
+                var validationProblemDetails = new ValidationProblemDetails(ex.Errors)
+                {
+                    Status = (int)HttpStatusCode.BadRequest,
+                    Title = "Validation Failed",
+                    Detail = "One or more validation errors occurred.",
+                    Instance = context.Request.Path
+                };
+                _logger.LogWarning(ex, "Validation failure at {Path}: {@Errors}", context.Request.Path, ex.Errors);
+                var validationJson = JsonSerializer.Serialize(validationProblemDetails, new JsonSerializerOptions
+                {
+                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+                });
+                await response.WriteAsync(validationJson);
+                return;
+
             case DbUpdateConcurrencyException ex:
                 response.StatusCode = (int)HttpStatusCode.Conflict;
                 problemDetails.Status = (int)HttpStatusCode.Conflict;
