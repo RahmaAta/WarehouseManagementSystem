@@ -598,6 +598,15 @@ purchaseOrder.Status = PurchaseOrderStatus.Received; // استلم بضاعة م
 
 ---
 
+### 💡 ترقية استثنائية: .NET 10.0 Target Framework & Native OpenAPI
+تمت ترقية جميع مشاريع الحل الستة لاستهداف **`.NET 10.0`**:
+- استبدال مكتبة `Swashbuckle.AspNetCore` القديمة بمنظومة **Native OpenAPI** الرسمية من مايكروسوفت (`builder.Services.AddOpenApi()` و `app.MapOpenApi()`).
+- دمج **Scalar API Reference** مع الـ Native OpenAPI لتوليد التوثيق والتجربة التفاعلية في المسار `/scalar`.
+- التحقق من عمل كافة اختبارات الـ Unit Tests (18 اختباراً) بنجاح فائق تحت Runtime الـ .NET 10.
+
+---
+
+
 
 
 
