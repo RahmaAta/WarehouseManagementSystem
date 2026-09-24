@@ -1094,11 +1094,110 @@ purchaseOrder.Status = PurchaseOrderStatus.Received; // استلم بضاعة م
 
 ---
 
+## 19. Sales Orders Lifecycle Flow (دورة حياة أوامر البيع والتوزيع)
 
+### 1. What was done? (ما الذي تم إنجازه؟)
+1. **Sales Order State Machine (آلة حالات أوامر البيع والتوزيع)**:
+   - تمكين دورة حياة معتمدة لأوامر الصرف والتوزيع في سلاسل الإمداد المؤسسية:
+     $$\text{Pending} \xrightarrow{\text{Confirm (Reserve Stock)}} \text{Confirmed} \xrightarrow{\text{Complete (Fulfill & StockOut)}} \text{Completed} \quad (\text{or } \text{Cancelled (Release Stock)})$$
+2. **Commands & Handlers Separation (فصل الأوامر عن المعالجات في ملفات مستقلة)**:
+   - **`CreateSalesOrderCommand` & `CreateSalesOrderCommandHandler`**: إنشاء أمر بيع بحالة `Pending` مع فحص وجود ونشاط العميل (`customer.IsActive`) والمستودع (`warehouse.IsActive`) وصلاحية المنتجات ومنع تكرار أي صنف في سطور الطلب، مع توليد تلقائي للرقم الفريد `OrderNumber`.
+   - **`ConfirmSalesOrderCommand` & `ConfirmSalesOrderCommandHandler`**: اعتماد الطلب ذرياً داخل `IDbContextTransaction`:
+     - فحص الرصيد المتاح الحر (`AvailableQuantity`) لكل بند في المستودع المختار.
+     - حجز الكمية المطلوبة فورياً عبر استدعاء `inventoryItem.ReserveStock(quantity)` لمنع البيع الزائد (Overselling) لأي عميل آخر.
+     - تحويل الحالة إلى `Confirmed` وتسجيل اسم المعتمد وتوقيت الاعتماد.
+   - **`CompleteSalesOrderCommand` & `CompleteSalesOrderCommandHandler`**: تنفيذ وصرف الطلب ذرياً:
+     - خصم البضاعة المحجوزة والكلية عبر `inventoryItem.FulfillReservedStock(quantity)`.
+     - تسجيل حركة صرف غير قابلة للتعديل في دفتر الأستاذ (`StockTransaction.CreateStockOut`) متضمنة رقم أمر البيع واسم العميل ومأمور الصرف.
+     - تحويل الحالة إلى `Completed`.
+   - **`CancelSalesOrderCommand` & `CancelSalesOrderCommandHandler`**: إلغاء أمر البيع:
+     - إذا كان الطلب في حالة `Confirmed`، يتم تلقائياً فك حجز البضاعة (`inventoryItem.ReleaseStock(quantity)`) وإعادتها فوراً للرصيد المتاح للبيع.
+     - حظر إلغاء أي أمر بيع تم إكماله وشحنه بالفعل (`Completed`).
+3. **Queries (استعلامات أوامر البيع)**:
+   - **`GetSalesOrdersQuery` & `GetSalesOrdersQueryHandler`**: استعلام مرقم (`PaginatedList<SalesOrderDto>`) يدعم التصفية حسب الحالة (`Status`)، العميل (`CustomerId`)، المستودع (`WarehouseId`)، والبحث بالرقم أو اسم العميل.
+   - **`GetSalesOrderByIdQuery` & `GetSalesOrderByIdQueryHandler`**: استعلام تفصيلي لأمر البيع مع كافة بنوده وأسعاره وتفاصيل المستودع والعميل.
+4. **RESTful API Controller with RBAC (`SalesOrdersController`)**:
+   - `GET /api/salesorders`: تصفية وترقيم لكافة الطلبات.
+   - `GET /api/salesorders/{id}`: استعلام تفصيلي بالـ ID.
+   - `POST /api/salesorders`: إنشاء أمر بيع (`Admin,WarehouseManager`).
+   - `POST /api/salesorders/{id}/confirm`: اعتماد وحجز المخزون (`Admin,WarehouseManager,WarehouseStaff`).
+   - `POST /api/salesorders/{id}/complete`: صرف المخزون وتسجيل حركة StockOut (`Admin,WarehouseManager,WarehouseStaff`).
+   - `POST /api/salesorders/{id}/cancel`: إلغاء وفك الحجز (`Admin,WarehouseManager`).
+5. **Automated Unit Testing (`SalesOrdersCommandHandlerTests`)**:
+   - كتابة 12 اختبار وحدة شامل تغطي كافة مسارات النجاح والقيود والتحقق من التراجع عن الحجز ومنع البيع الزائد.
+   - **الحصيلة الإجمالية للاختبارات**: **99 اختباراً ناجحاً بنسبة 100% (Passed: 99, Failed: 0)**.
 
+---
 
+### 2. Why are we doing it? (لماذا نفعل ذلك؟)
+- أوامر البيع (`Sales Orders`) تمثل مسار **المخرجات (Outbound Pipeline)** ومصدر إيرادات الشركة الأساسي.
+- إدارة صرف المخزون بدون استراتيجية حجز مسبق (Two-Phase Stock Allocation) تؤدي إلى أسوأ كابوس في التجارة وسلاسل الإمداد: **البيع على المكشوف (Overselling)** والوعود الكاذبة للعملاء، حيث يُباع نفس المنتج لأكثر من عميل في نفس اللحظة لأن النظام خصم البضاعة متأخراً أو لم يحجزها بدقة.
 
+---
 
+### 3. Why is this useful in a real backend? (فائدته في سوق العمل وعالم المشاريع الحقيقية)
+1. **Two-Phase Inventory Commitment (الحجز ثم الصرف الفعلي)**:
+   - في المتاجر الكبرى والأنظمة اللوجستية، العميل يطلب ويتم اعتماد طلبه (Phase 1: `Reserve`)، ثم تمر الشحنة بمراحل التجهيز والتغليف (Pick & Pack)، وأخيراً عند خروج الشاحنة من بوابة المخزن يتم الصرف النهائي (Phase 2: `Fulfill`).
+   - هذا الفصل يضمن أن البضاعة المادية لا تُخصم من الرفوف إلا عند الشحن الحقيقي، بينما تُحجب برمجياً عن أي متسوق آخر فور التأكيد.
+2. **Graceful Reservation Rollback upon Cancellation (فك الحجز التلقائي)**:
+   - إذا ألغى العميل طلبه قبل الشحن، لا يحتاج أمين المخزن للبحث اليدوي وإعادة الحسابات؛ فبمجرد استدعاء `CancelSalesOrder` يفك النظام الحجز فوراً وتعود البضاعة للمخزون المتاح للبيع (`AvailableQuantity`).
 
+---
 
+### 4. Why did we choose this approach? (لماذا هذا التوجه تحديداً؟)
+1. **Separation of Physical vs Reserved Stock**:
+   - `Quantity`: إجمالي البضاعة الموجودة فعلياً في المستودع.
+   - `ReservedQuantity`: البضاعة المخصصة لأوامر مؤكدة بانتظار الشحن.
+   - `AvailableQuantity = Quantity - ReservedQuantity`: الرصيد الحر الفعلي المتاح للبيع الفوري.
+2. **Domain-Driven Reservation Invariants**:
+   - دوال الكيان `inventoryItem.ReserveStock` و `inventoryItem.FulfillReservedStock` هي المسؤولة الحصرية عن تعديل الأرقام وفحص عدم النزول تحت الصفر ورمي `InsufficientStockException`.
+3. **Atomic StockOut Audit Trail**:
+   - الصرف لا يغير الرقم في صمت، بل يسجل سطراً ثابتاً في `StockTransactions` بنوع `StockOut` يحتوي على رقم الفاتورة والكمية والموظف المنفذ.
+
+---
+
+### 5. What alternatives exist? (ما هي البدائل المتاحة؟)
+1. **Direct Immediate Stock Deduction**: خصم الكمية من الرصيد مباشرة بمجرد إنشاء مسودة الأوردر.
+2. **Post-Fulfillment Reservation**: ترك المخزون حراً دون حجز حتى وصول سيارة الشحن، ثم التحقق إذا كانت البضاعة متوفرة أم نفدت.
+3. **Soft/Hard Delete on Cancellation**: حذف سجل أمر البيع من قاعدة البيانات عند الإلغاء.
+
+---
+
+### 6. Why are we NOT using those alternatives here? (لماذا رفضنا البدائل؟)
+- **Direct Immediate Stock Deduction**: تسبب تشوهات محاسبية وفوضى في الجرد؛ لأن البضاعة ما زالت موجودة مادياً على أرفف المستودع، وإذا لم يدفع العميل أو فشل التأكيد تضطر لعملية إرجاع محاسبية معقدة.
+- **Post-Fulfillment Reservation**: وصفة مؤكدة لكارثة Overselling؛ ستبيع 100 قطعة لـ 5 عملاء في وقت التخفيضات ولا تستطيع تلبية سوى عميلين، مما يدمر سمعة الشركة.
+- **Deleting Sales Orders**: ممنوع قانونياً ومحاسبياً؛ سجلات المبيعات وسجل أرقام الفواتير يجب أن تظل محفوظة برقمها وحالتها كـ `Cancelled` لأغراض الضرائب والرقابة المالية.
+
+---
+
+### 7. What problem does this approach solve? (ما المشكلة التي يحلها؟)
+- **Race Conditions in High-Volume Checkouts**: حماية المخزون من الحجز المزدوج عبر `RowVersion` و `ReserveStock`.
+- **Fulfillment Visibility**: وضوح تام لمديري المخازن بين ما هو موجود على الرفوف فعلياً وما هو محجوز ومستعد للخروج.
+- **Zombie Reservations Prevention**: ضمان تفريغ الحصص المحجوزة فور إلغاء الطلب دون أي تدخل بشري.
+
+---
+
+### 8. What could go wrong? (ما الذي قد يفشل وكيف نتجنبه؟)
+1. **Cancelling Already Dispatched/Completed Orders**:
+   - محاولة إلغاء أوردر خرجت شاحنته بالفعل.
+   - **الحل**: الكيان `SalesOrder.Cancel()` يرمي `InvalidOperationException` صريحة تمنع الإلغاء إذا كانت الحالة `Completed`.
+2. **Fulfilling Unconfirmed Orders**:
+   - محاولة صرف بضاعة لأمر بيع ما زال في حالة `Pending`.
+   - **الحل**: الكيان `SalesOrder.Complete()` يرمي `InvalidOrderStateException` إن لم تكن الحالة `Confirmed`.
+3. **Partial Stock Allocation Failure**:
+   - لو كان أمر البيع يحتوي على 5 منتجات، وتوفر 4 بينما عجز المنتج الخامس.
+   - **الحل**: تنفيذ عملية الحجز داخل `IDbContextTransaction`؛ عند رمي `InsufficientStockException` للصنف الخامس، تتراجع الترانزاكشن بالكامل (`Rollback`) ولا يُحجز أي صنف بالخطأ.
+
+---
+
+### 9. What should I remember for an interview? (ماذا تقول في الإنترفيو؟)
+> **Interview Question**: "How do you handle stock allocation, fulfillments, and prevent overselling during high-volume sales order processing?"
+>
+> **الإجابة النموذجية**:
+> "We implement a **Two-Phase Inventory Commitment Pattern** backed by an encapsulated Domain State Machine:  
+> 1. **Pending ➡️ Confirmed (Reservation Phase)**: During order confirmation, within an atomic database transaction, the system validates that `AvailableQuantity (Quantity - ReservedQuantity)` is sufficient for every line item. It invokes `inventoryItem.ReserveStock(qty)` to lock the allocation without physically decrementing physical on-hand stock. If any line lacks stock, an `InsufficientStockException` aborts the transaction.  
+> 2. **Confirmed ➡️ Completed (Fulfillment Phase)**: Upon physical warehouse dispatch, `inventoryItem.FulfillReservedStock(qty)` decrements both reserved and physical balances atomically, appending an immutable `StockOut` record in `StockTransactions` for accounting and audit compliance.  
+> 3. **Cancellation Handling**: If a confirmed order is cancelled prior to dispatch, `inventoryItem.ReleaseStock(qty)` instantly restores the allocated units to the available pool, preventing zombie inventory allocations."
+
+---
 
