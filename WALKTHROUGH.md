@@ -606,6 +606,113 @@ purchaseOrder.Status = PurchaseOrderStatus.Received; // استلم بضاعة م
 
 ---
 
+## 14. Phase 5: Products & Categories Feature (إدارة المنتجات والتصنيفات)
+
+### 1. What was done? (ما الذي تم إنجازه؟)
+1. **Generic Pagination Model (`PaginatedList<T>`)**:
+   - بناء مغلف عام للصفحات يدعم `PageNumber`، `PageSize`، `TotalPages`، و `TotalCount` مع خصائص الملاحة `HasPreviousPage` و `HasNextPage`، وتوليد الصفحات بكفاءة عبر `Skip` و `Take` على مستوى قاعدة البيانات (SQL Server).
+2. **Categories CQRS (إدارة التصنيفات)**:
+   - **Commands**:
+     - `CreateCategoryCommand`: إنشاء تصنيف جديد مع فحص منع تكرار الاسم (Case-Insensitive).
+     - `UpdateCategoryCommand`: تحديث بيانات التصنيف مع منع تكرار الاسم مع تصنيفات أخرى.
+     - `DeleteCategoryCommand`: فرض قاعدة العمل (Business Guard): منع حذف أي تصنيف يحتوي على منتجات مرتبطة به لحماية التكامل المرجعي.
+   - **Queries**:
+     - `GetCategoriesQuery`: جلب التصنيفات مع إحصاء عدد المنتجات التابعة لكل تصنيف (`ProductsCount`) مع خيار تصفية التصنيفات النشطة فقط.
+     - `GetCategoryByIdQuery`: جلب تصنيف محدد بالـ ID.
+3. **Products CQRS (إدارة المنتجات والمخزون المتاح)**:
+   - **Commands**:
+     - `CreateProductCommand`: التحقق من وجود التصنيف والتأكد من فرادية الرمز التعريفي (`SKU`) عبر النظام ككل وتغليف قواعد الكيان (السعر والحد الأدنى).
+     - `UpdateProductCommand`: تعديل بيانات المنتج وفحص عدم تكرار الـ SKU مع منتج آخر.
+     - `DeleteProductCommand`: تنفيذ قاعدة أمان المستودعات: منع حذف أو تعطيل أي منتج لديه رصيد فعلي في المستودع (`Quantity > 0`). إذا كان الرصيد صفراً، يتم الحذف المنطقي الآمن (`Soft Delete`) عبر استدعاء `product.Deactivate()` للحفاظ على سجلات الفواتير وأوامر الشراء التاريخية.
+     - `ActivateProductCommand`: إعادة تفعيل المنتجات المعطلة.
+   - **Queries**:
+     - `GetProductsQuery`: استعلام متطور يدعم الترقيم (`Pagination`)، الفلترة حسب التصنيف (`CategoryId`)، البحث في الاسم أو الـ SKU، وتصفية المنتجات النشطة، مع حساب إجمالي المخزون المتاح (`TotalAvailableStock = Quantity - ReservedQuantity`) على مستوى الـ Query في قاعدة البيانات.
+     - `GetProductByIdQuery`: جلب تفاصيل المنتج بالـ ID.
+     - `GetProductBySkuQuery`: البحث السريع بالـ SKU لدعم قارئات الباركود المحمولة (`Barcode Handheld Scanners`).
+4. **Global Exception Handling Middleware**:
+   - بناء `ExceptionHandlingMiddleware` في طبقة الـ API واعتراض كافة الاستثناءات وتحويلها إلى استجابات قياسية وفق معيار RFC 7807 (`ProblemDetails`):
+     - `KeyNotFoundException` ➡️ `404 Not Found`
+     - `DomainException` / `InvalidOperationException` / `ArgumentException` ➡️ `400 Bad Request`
+     - `UnauthorizedAccessException` ➡️ `403 Forbidden`
+     - `Exception` العام ➡️ `500 Internal Server Error` مع تسجيل الـ Logs.
+5. **RESTful Controllers with RBAC**:
+   - `CategoriesController`: عمليات القراءة متاحة، وعمليات التعديل والحذف والإضافة محمية بصلاحيات `[Authorize(Roles = "Admin,WarehouseManager")]`.
+   - `ProductsController`: ترقيم، فلترة، بحث، قراءة باركود (`/api/products/sku/{sku}`)، حماية العمليات التعديلية بـ RBAC.
+6. **Automated Unit Testing Suite**:
+   - دمج `Microsoft.EntityFrameworkCore.InMemory` لاختبار الـ Handlers بقواعد بيانات معزولة تماماً في الذاكرة.
+   - إضافة 16 اختبار وحدة جديد (7 للتصنيفات + 9 للمنتجات) لتصل حصيلة الاختبارات إلى **34 اختباراً ناجحاً بنسبة 100%**.
+
+---
+
+### 2. Why are we doing it? (لماذا نفعل ذلك؟)
+- المنتجات والتصنيفات هي القلب التجاري والتشغيلي لأي نظام إدارة مستودعات (WMS).
+- بدون إدارة مرنة ومحمية للمنتجات، لا يمكن إنشاء أوامر شراء (`Purchase Orders`)، أوامر بيع (`Sales Orders`)، أو تتبع المخزون في الرفوف والأماكن (`Warehouse Locations`).
+
+---
+
+### 3. Why is this useful in a real backend? (فائدته في سوق العمل)
+- **High-Performance Pagination**: إذا كان لديك 500,000 منتج في المستودع، جلب المنتجات دفعة واحدة إلى الذاكرة (`context.Products.ToList()`) كفيل بإسقاط السيرفر باستهلاك هائل للـ RAM! استخدام `Skip` و `Take` يضمن أن قاعدة البيانات ترجع فقط الـ 10 أو 20 سجلاً المطلوبة.
+- **Data Integrity & Soft Deletes**: في الحياة الواقعية، لا يمكنك أبداً عمل `Hard Delete` لمنتج بيع منه 1000 قطعة العام الماضي؛ لأن حذفه سيكسر السجلات الضريبية والمالية وأوامر البيع التاريخية! لذلك الحذف المنطقي (`Deactivate`) هو المعيار المعتمد عالمياً.
+- **Barcode Scanner Integration**: في المستودعات اللوجستية، العمال لا يبحثون بالـ ID الداخلي لقاعدة البيانات، بل يمسحون الباركود بجهاز المسح الضوئي؛ توفير `GetBySku` يلبي هذا الاحتياج الصناعي الحرج.
+
+---
+
+### 4. Why did we choose this approach? (لماذا هذا التوجه تحديداً؟)
+1. **CQRS Separations for Clean Evolution**:
+   - فصل استعلام المنتجات (`GetProductsQuery`) عن أوامر التعديل (`CreateProductCommand`) يسمح بتحسين الـ Projection والاستعلامات دون المساس بمنطق العمل (Domain Invariants).
+2. **Server-Side Projection via EF Core**:
+   - حساب المخزون المتاح تم عبر:
+     ```csharp
+     p.InventoryItems.Sum(i => (int?)(i.Quantity - i.ReservedQuantity)) ?? 0
+     ```
+     مما يجعل SQL Server هو من يقوم بالعملية الحسابية ويُرجع رقماً جاهزاً للـ API دون تحميل مئات كائنات `InventoryItem` في الذاكرة.
+3. **RFC 7807 Standard Error Responses**:
+   - بدلاً من إرجاع رسائل خطأ عشوائية، اعتمدنا معيار `ProblemDetails` الرسمي عالمياً في الـ REST APIs.
+
+---
+
+### 5. What alternatives exist? (ما هي البدائل؟)
+1. **Hard Delete مباشرة من الجدول (`context.Products.Remove(product)`)**.
+2. **Client-Side Filtering & Pagination**: جلب جميع البيانات ثم عمل `.Skip().Take()` في كود الـ C#.
+3. **Controller-Heavy Architecture**: كتابة الـ Queries وفحوصات الـ Validation داخل الـ Controller مباشرة بدون MediatR.
+
+---
+
+### 6. Why are we NOT using those alternatives here? (لماذا رفضنا البدائل؟)
+- **Hard Delete**: كارثي في أنظمة الـ ERP والـ WMS؛ يسبب أخطاء `Foreign Key Constraint Violation` أو فقدان تاريخ الحركات المخزنية والمالية.
+- **Client-Side Pagination**: غير قابل للتوسع (Non-scalable)؛ مع نمو حجم الكتالوج سيؤدي إلى OutOfMemoryException وبطء شديد في الاستجابة.
+- **Controller-Heavy**: ينتهك Clean Architecture ومبادئ الـ Single Responsibility، ويجعل كتابة الـ Unit Tests شبه مستحيلة دون تشغيل الـ HTTP Pipeline كاملاً.
+
+---
+
+### 7. What problem does this approach solve? (ما المشكلة التي يحلها؟)
+- **Ghost Deletions of Physical Inventory**:
+  - منع حذف أو إيقاف منتج ما زال المستودع يحتوي على بضاعة فعلية منه على الأرفف، مما يحمي النظام من ضياع تتبع البضاعة الملموسة.
+- **Duplicate SKU Collision**:
+  - فحص الـ SKU قبل الحفظ يمنع الخلط بين البضائع في المستودع ويمنع حدوث أخطاء استلام بضائع موردين مختلفين.
+
+---
+
+### 8. What could go wrong? (ما الذي قد يفشل وكيف نتجنبه؟)
+- **EF Core Translation Failure with Unmapped Properties**:
+  - لو استخدمنا خاصية C# غير معرّفة في جداول الداتابيز (مثل `i.AvailableQuantity`) داخل جملة `Select` في استعلام `IQueryable`، سيفشل محرك EF Core في ترجمتها إلى SQL ويطلق `InvalidOperationException`.
+  - **الحل الهندسي**: استخدام الأعمدة الحقيقية المعرفة في قاعدة البيانات `(i.Quantity - i.ReservedQuantity)` داخل الاستعلامات المباشرة.
+- **Race Condition on SKU Generation**:
+  - قد يحاول مستخدمان إنشاء منتجين بنفس الـ SKU في نفس اللحظة.
+  - **الحل الهندسي**: بالإضافة لفحص الـ Application Layer، يوجد `Unique Index` صريح على مستوى SQL Server تم بناؤه في `ProductConfiguration` بالـ Fluent API في Phase 3 كخط دفاع أخير وقاطع.
+
+---
+
+### 9. What should I remember for an interview? (ماذا تقول في الإنترفيو؟)
+> **Interview Question**: "How do you design a high-throughput catalog query and handle deletion safely in an enterprise Warehouse System?"
+>
+> **الإجابة النموذجية**:
+> "For catalog queries with large datasets, we enforce **database-level offset pagination** (`Skip` and `Take`) using a generic `PaginatedList<T>`, combining projection with server-side aggregation so only the requested page of DTOs is transferred over the wire without loading heavy entity graphs.  
+> For deletion, an enterprise system must never perform physical (hard) deletes on catalog items that are tied to audit logs, ledger transactions, or order lines. Instead, we enforce a domain guard checking if physical stock is still on hand (`Quantity > 0`); if clear, we apply **Soft Deletion** via `product.Deactivate()`. This preserves referential integrity, historical financial reporting, and audit trails while hiding deactivated products from daily operations."
+
+---
+
+
 
 
 

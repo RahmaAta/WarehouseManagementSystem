@@ -51,6 +51,9 @@ builder.Services.AddOpenApi();
 
 var app = builder.Build();
 
+// Global Exception Handling Middleware
+app.UseMiddleware<WarehouseManagement.API.Middlewares.ExceptionHandlingMiddleware>();
+
 // Configure OpenAPI & Scalar API reference documentation
 if (app.Environment.IsDevelopment())
 {
@@ -63,6 +66,10 @@ if (app.Environment.IsDevelopment())
         options.WithTitle("Warehouse & Inventory Management API")
                .WithDefaultHttpClient(ScalarTarget.CSharp, ScalarClient.HttpClient);
     });
+
+    // Developer convenience redirects
+    app.MapGet("/swagger", () => Results.Redirect("/scalar/v1"));
+    app.MapGet("/scalar", () => Results.Redirect("/scalar/v1"));
 }
 
 app.UseHttpsRedirection();
