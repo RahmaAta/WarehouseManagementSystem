@@ -448,4 +448,4 @@ It contains **over 1,500 lines** of detailed architectural explanations, technic
 
 ## 📄 License
 
-This project was built as part of Digitera Bootcamp
+This project was built as final project of Digitera Bootcamp
