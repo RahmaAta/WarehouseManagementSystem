@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using WarehouseManagement.Domain.Exceptions;
 
 namespace WarehouseManagement.API.Middlewares;
@@ -44,6 +45,13 @@ public class ExceptionHandlingMiddleware
 
         switch (exception)
         {
+            case DbUpdateConcurrencyException ex:
+                response.StatusCode = (int)HttpStatusCode.Conflict;
+                problemDetails.Status = (int)HttpStatusCode.Conflict;
+                problemDetails.Title = "Concurrency Conflict";
+                problemDetails.Detail = "A concurrency conflict occurred. The record was modified by another operation. Please reload the latest state and retry.";
+                _logger.LogWarning(ex, "Concurrency conflict detected at {Path}", context.Request.Path);
+                break;
             case KeyNotFoundException ex:
                 response.StatusCode = (int)HttpStatusCode.NotFound;
                 problemDetails.Status = (int)HttpStatusCode.NotFound;

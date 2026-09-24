@@ -57,6 +57,22 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
 
     public async Task<IDbContextTransaction> BeginTransactionAsync(CancellationToken cancellationToken = default)
     {
+        if (Database.ProviderName == "Microsoft.EntityFrameworkCore.InMemory")
+        {
+            return new NoOpTransaction();
+        }
+
         return await Database.BeginTransactionAsync(cancellationToken);
     }
+}
+
+internal class NoOpTransaction : IDbContextTransaction
+{
+    public Guid TransactionId { get; } = Guid.NewGuid();
+    public void Commit() { }
+    public Task CommitAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+    public void Rollback() { }
+    public Task RollbackAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+    public void Dispose() { }
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }

@@ -712,6 +712,108 @@ purchaseOrder.Status = PurchaseOrderStatus.Received; // استلم بضاعة م
 
 ---
 
+## 15. Phase 6: Warehouses & Inventory Management (إدارة المستودعات والعمليات المخزنية)
+
+### 1. What was done? (ما الذي تم إنجازه؟)
+1. **Warehouses CQRS (إدارة المستودعات)**:
+   - **Commands**:
+     - `CreateWarehouseCommand`: إنشاء مستودع جديد مع التحقق الصارم من عدم تكرار الاسم.
+     - `UpdateWarehouseCommand`: تعديل بيانات المستودع وموقعه الجغرافي.
+     - `DeleteWarehouseCommand`: فرض قاعدة عمل أمان المستودعات: **منع إغلاق أو حذف أي مستودع لا يزال يحتوي على بضاعة فعلية (`Quantity > 0`)**. إذا كان رصيده صفراً، يُنفذ الحذف المنطقي (`Deactivate`).
+     - `ActivateWarehouseCommand`: إعادة تنشيط المستودعات المعطلة.
+   - **Queries**:
+     - `GetWarehousesQuery`: جلب المستودعات مع حساب إجمالي عدد المنتجات المخزنة وعدد الوحدات الإجمالي (`TotalStockUnits`).
+     - `GetWarehouseByIdQuery`: استعلام مستودع محدد.
+     - `GetWarehouseStockQuery`: استعلام مرقم (`Paginated`) لكافة المنتجات والأرصدة الحرة داخل مستودع معين مع دعم البحث.
+2. **Inventory Stock Operations CQRS (العمليات المخزنية وسجل الحركات)**:
+   - **Commands**:
+     - `AddStockCommand`: إضافة رصيد بضاعة لمستودع محدد، وإنشاء سجل `InventoryItem` جديد تلقائياً إذا كان أول تخزين للمنتج، وتسجيل حركة في دفتر الأستاذ الرقمي (`StockTransaction.CreateStockIn`) مع توثيق اسم المستخدم المنفذ.
+     - `RemoveStockCommand`: سحب أو إعدام بضاعة تالفة، مع استدعاء دالة الكيان `RemoveStock` التي تضمن عدم سحب كمية أكبر من الرصيد الحر المتاح، وتسجيل حركة (`StockOut`).
+     - `TransferStockCommand`: تحويل بضاعة بين مستودعين بصورة ذرية (`Atomic Database Transaction`). منع التحويل لنفس المستودع (`SameWarehouseTransferException`)، خصم من المصدر، إضافة للهدف، وتسجيل حركة تحويل (`StockTransaction.CreateTransfer`).
+   - **Queries**:
+     - `GetProductStockQuery`: عرض التوزيع الجغرافي لرصيد منتج معين عبر جميع مستودعات الشركة.
+     - `GetStockTransactionsQuery`: دفتر الأستاذ للتدقيق والمراجعة (`Audit Trail`) لعرض تاريخ كافة الحركات المخزنية مع الفلترة بالمنتج أو المستودع.
+3. **Concurrency & Exception Middleware Enhancement**:
+   - تحديث `ExceptionHandlingMiddleware` لاصطياد استثناء التزامن في EF Core (`DbUpdateConcurrencyException`) وترجمته لـ HTTP `409 Conflict`، بالإضافة للاصطياد الأوتوماتيكي لـ `SameWarehouseTransferException` و `InsufficientStockException`.
+4. **RESTful API Controllers with RBAC**:
+   - `WarehousesController`: إدارة المرافق والمخزون الداخلي (`/api/warehouses/{id}/stock`) محمية بصلاحيات المديرين.
+   - `InventoryController`: عمليات الإضافة والسحب والتحويل، واستعلامات التوزيع وسجل العمليات (`/api/inventory/transactions`).
+5. **Testing Suite (قواعد بيانات In-Memory)**:
+   - إضافة 19 اختبار وحدة جديد، لترتفع الحصيلة الإجمالية إلى **53 اختباراً بنسبة نجاح 100%**.
+
+---
+
+### 2. Why are we doing it? (لماذا نفعل ذلك؟)
+- الكتالوج وحده (المنتجات والتصنيفات) مجرد قائمة أسعار وبيانات وصفية. القيمة الحقيقية للـ WMS تبدأ عندما نعرف: **أين توجد هذه المنتجات فعلياً، وبأي كمية، وما هي حركة دخول وخروج كل قطعة؟**
+- تتبع المخزون في مستودعات متعددة (Multi-Warehouse) هو المعيار الأساسي للشركات المتوسطة والعملاقة التي تمتلك مراكز توزيع وفروعاً جغرافية متعددة.
+
+---
+
+### 3. Why is this useful in a real backend? (فائدته في سوق العمل)
+- **Immutable Ledger / Audit Trail (دفتر أستاذ غير قابل للتعديل)**:
+  - في المحاسبة وإدارة المخازن، لا يجوز تعديل رقم المخزون في الجدول (`Quantity = 50`) دون معرفة: *من عدله؟ متى؟ ولماذا؟ وما هو رقم المستند المرجعي؟*
+  - جدول `StockTransactions` يوفر تتبعاً جنائياً دقيقاً لكل حركة (Stock In, Stock Out, Transfer).
+- **Atomic Stock Transfers (التحويل الذري)**:
+  - لو قمت بسحب 100 قطعة من "مستودع القاهرة" لإرسالها لـ "مستودع الإسكندرية"، وحدث انقطاع في الكهرباء أو خطأ في الداتابيز قبل الإضافة للإسكندرية، بدون `Database Transaction` ستضيع الـ 100 قطعة في الهواء! الترانزاكشن تضمن: **إما أن تكتمل الحركتان معاً، أو يتم التراجع التام (Rollback)**.
+
+---
+
+### 4. Why did we choose this approach? (لماذا هذا التوجه تحديداً؟)
+1. **Rich Domain Encapsulation**:
+   - منطق التحقق من كفاية المخزون موجود داخل دالة `item.RemoveStock(quantity)` داخل كيان `InventoryItem`، وليس مبعثراً في الـ Controllers أو Handlers.
+2. **Optimistic Concurrency with `RowVersion`**:
+   - تجنب إقفال الجداول (Pessimistic Locks) الذي يبطئ النظام، واستخدام عمود الـ `RowVersion` لاكتشاف التعديلات المتزامنة والرد بـ `409 Conflict`.
+3. **Explicit Audit Logging**:
+   - كل عملية مخزنية تلزم تسجيل `StockTransaction` في نفس الترانزاكشن.
+
+---
+
+### 5. What alternatives exist? (ما هي البدائل؟)
+1. **Single Location Inventory**: حقل `Quantity` في جدول الـ `Products` مباشرة بدون جدول `InventoryItems` أو `Warehouses`.
+2. **Pessimistic Locking**: عمل `SELECT ... WITH (XLOCK)` على مستوى SQL Server لحجز السجل بالكامل أثناء التعديل.
+3. **No Audit Trail**: الاكتفاء بتحديث رقم المخزون بدون تسجيل تاريخ الحركات.
+
+---
+
+### 6. Why are we NOT using those alternatives here? (لماذا رفضنا البدائل؟)
+- **Single Location Inventory**: نظام بدائي جداً لا يصلح لأي شركة لديها أكثر من مخزن واحد أو شاحنة نقل.
+- **Pessimistic Locking**: يقلل من سرعة النظام (Throughput) ويسبب Deadlocks واختناقات هائلة عندما يحاول 50 موظف بيع نفس المنتج في أوقات التخفيضات (Flash Sales).
+- **No Audit Trail**: مرفوض تماماً في المقابلات التقنية وفي بيئة العمل الحقيقية؛ لأنه يجعل اكتشاف السرقات أو العجز المخزني مستحيلاً.
+
+---
+
+### 7. What problem does this approach solve? (ما المشكلة التي يحلها؟)
+- **Ghost Warehouse Elimination**:
+  - منع إلغاء تفعيل أي مستودع ما زالت به بضائع مودعة فيه، مما يحمي من فقدان تتبع أصول الشركة.
+- **Self-Transfer Bug**:
+  - منع التحويل لنفس المستودع عبر `SameWarehouseTransferException` لمنع إفساد إحصائيات حركة البضائع.
+- **Phantom Reads & Over-selling**:
+  - حماية المخزون من البيع بأكثر من الرصيد المتاح بفضل التحقق من `AvailableQuantity = Quantity - ReservedQuantity`.
+
+---
+
+### 8. What could go wrong? (ما الذي قد يفشل وكيف نتجنبه؟)
+- **Deadlocks during Cross Transfers**:
+  - لو أن موظفاً ينقل بضاعة من مستودع 1 إلى مستودع 2، وفي نفس اللحظة موظف آخر ينقل من 2 إلى 1.
+  - **الحل الهندسي**: في الترانزاكشنز المعقدة، يتم الترتيب حسب الـ ID للأقفال، واستخدام `RowVersion` للاكتشاف الفوري لأي تصادم.
+- **Transaction Support in Test Environments**:
+  - قواعد بيانات `EF Core In-Memory` لا تدعم الـ Transactions الحقيقية وترمي `InvalidOperationException`.
+  - **الحل الهندسي**: قمنا ببناء `NoOpTransaction` مخصص داخل `ApplicationDbContext` يشتغل تلقائياً عند تشغيل الـ In-Memory Tests دون المساس بترانزاكشنز الـ SQL Server الحقيقية في الـ Production!
+
+---
+
+### 9. What should I remember for an interview? (ماذا تقول في الإنترفيو؟)
+> **Interview Question**: "How do you guarantee stock accuracy and prevent race conditions during warehouse stock operations in high-concurrency systems?"
+>
+> **الإجابة النموذجية**:
+> "We employ a **three-tier defense strategy**:  
+> 1. **Domain Isolation**: Physical quantity and reserved quantity are tracked separately (`AvailableQuantity = Quantity - ReservedQuantity`), and rich domain methods enforce stock sufficiency invariants before mutations.  
+> 2. **Optimistic Concurrency Control (OCC)**: Entities utilize a database-generated `RowVersion` concurrency token. If two operators attempt simultaneous adjustments, EF Core detects the discrepancy and throws `DbUpdateConcurrencyException`, translated by our API middleware to HTTP `409 Conflict`.  
+> 3. **ACID Transactions & Immutable Ledger**: Multi-point operations like inter-warehouse transfers execute inside an explicit `IDbContextTransaction`. Every stock change atomically writes an immutable `StockTransaction` audit log containing the operator's identity, timestamps, and reference identifiers."
+
+---
+
+
 
 
 
