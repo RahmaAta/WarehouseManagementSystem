@@ -1,7 +1,9 @@
 using System.Text;
+using Hangfire;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using Scalar.AspNetCore;
+using WarehouseManagement.API.Filters;
 using WarehouseManagement.API.Services;
 using WarehouseManagement.Application;
 using WarehouseManagement.Application.Common.Interfaces;
@@ -77,6 +79,36 @@ app.UseHttpsRedirection();
 // Authentication MUST come before Authorization
 app.UseAuthentication();
 app.UseAuthorization();
+
+// Hangfire Dashboard and Recurring Jobs
+if (!string.IsNullOrEmpty(builder.Configuration.GetConnectionString("DefaultConnection")))
+{
+    app.UseHangfireDashboard("/hangfire", new DashboardOptions
+    {
+        DashboardTitle = "Warehouse Management WMS - Job Scheduler",
+        Authorization = new[] { new HangfireAuthorizationFilter() }
+    });
+
+    using var scope = app.Services.CreateScope();
+    var recurringJobManager = scope.ServiceProvider.GetService<IRecurringJobManager>();
+    if (recurringJobManager != null)
+    {
+        recurringJobManager.AddOrUpdate<ILowStockNotifierJob>(
+            "low-stock-check-hourly",
+            job => job.ExecuteAsync(CancellationToken.None),
+            Cron.Hourly);
+
+        recurringJobManager.AddOrUpdate<IStaleOrderCleanupJob>(
+            "stale-order-cleanup-daily",
+            job => job.ExecuteAsync(CancellationToken.None),
+            Cron.Daily);
+
+        recurringJobManager.AddOrUpdate<IDailyInventorySnapshotJob>(
+            "daily-inventory-snapshot",
+            job => job.ExecuteAsync(CancellationToken.None),
+            Cron.Daily(23, 0));
+    }
+}
 
 app.MapControllers();
 

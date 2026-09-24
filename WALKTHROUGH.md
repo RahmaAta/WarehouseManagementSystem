@@ -1300,3 +1300,93 @@ purchaseOrder.Status = PurchaseOrderStatus.Received; // استلم بضاعة م
 > 4. **RFC 7807 Global Middleware**: An ASP.NET Core exception handling middleware catches application `ValidationException` and serializes it into standard `ValidationProblemDetails` (HTTP 400), while concurrency conflicts (`DbUpdateConcurrencyException`) map to HTTP 409, missing records to HTTP 404, and unhandled errors to HTTP 500."
 
 ---
+
+## 21. Phase 12: Background Jobs & Scheduled Recurring Tasks with Hangfire (معمارية المعالجة في الخلفية والمهام المجدولة دورياً)
+
+### 1. What was done? (ما الذي تم إنجازه؟)
+1. **Hangfire Infrastructure & Distributed SQL Server Storage**:
+   - دمج محرك الجدولة والمعالجة في الخلفية [`Hangfire`](https://www.hangfire.io/) بالاعتماد على SQL Server كمخزن دائم للوظائف (`Persistent Storage`).
+   - إعداد خادم المعالجة في الخلفية (`Hangfire Server`) مع تحديد عدد المعالجات (`WorkerCount`) وتوزيع قوائم الانتظار بأولويات محددة (`critical`, `default`, `low`).
+2. **Dedicated Background Jobs (الوظائف المجدولة الآلية)**:
+   - **`ILowStockNotifierJob` & `LowStockNotifierJob`**:
+     - وظيفة دورية تعمل كل ساعة (`Cron.Hourly`) تفحص جميع المنتجات النشطة وتحدد المنتجات التي هبط رصيدها المتاح الحر (`AvailableQuantity`) عن حد الأمان الأدنى (`MinimumStockLevel`).
+     - إطلاق تنبيهات تحذيرية مفصلة (`LOW STOCK ALERT`) بحساب العجز المطلوب شراؤه فوراً لتسهيل مهام قسم المشتريات.
+   - **`IStaleOrderCleanupJob` & `StaleOrderCleanupJob`**:
+     - وظيفة دورية تعمل يومياً (`Cron.Daily`) تفحص أوامر البيع المتروكة أو المعلقة لفترات زمنية طويلة (> 24 ساعة للمسودات، > 48 ساعة للأوامر المؤكدة بدون صرف).
+     - إلغاء الأوامر آلياً داخل ترانزاكشن ذرية، مع **فك حجز البضاعة المحبوسة فوراً** (`inventoryItem.ReleaseStock(qty)`) وإعادتها للرصيد المتاح للبيع للعملاء الآخرين.
+   - **`IDailyInventorySnapshotJob` & `DailyInventorySnapshotJob`**:
+     - وظيفة ليلية تعمل يومياً عند الساعة 23:00 UTC لحساب إحصائيات الجرد الكلي والقيمة المالية الإجمالية للبضائع المخزنة (`Inventory Valuation`)، وتوليد سجل تدقيق يومي ثابت للمحاسبة وإدارة المخازن.
+3. **Secured Hangfire Dashboard (`HangfireAuthorizationFilter`)**:
+   - حماية لوحة تحكم Hangfire التفاعلية عبر مسار `/hangfire` بفلتر تفويض أمني صريح يسمح بالوصول المحلي للمطورين (Localhost)، ويشترط صلاحية `Admin` للمستخدمين عن بعد.
+4. **Automated Unit Testing**:
+   - كتابة 6 اختبارات وحدة جديدة في [`HangfireJobsTests.cs`](file:///d:/.NET%20Projects/Warehouse%20&%20Inventory%20Management%20System/tests/WarehouseManagement.UnitTests/Jobs/HangfireJobsTests.cs) تختبر اكتشاف العجز المخزني بدقة، وإلغاء الأوامر المتروكة وفك حجز البضاعة، وحساب تقييم المخزون المالي، وقواعد الأمان في لوحة التحكم.
+   - **الحصيلة الإجمالية للاختبارات**: **122 اختباراً ناجحاً بنسبة 100% (Passed: 122, Failed: 0)** دون أي أخطاء أو تحذيرات.
+
+---
+
+### 2. Why are we doing it? (لماذا نفعل ذلك؟)
+- في تطبيقات الـ Enterprise الحقيقية، لا يمكن الاعتماد على تفاعل المستخدم المباشر عبر الـ HTTP Request/Response لتنفيذ كل شيء!
+- إذا ترك عميل طلباً مؤكداً وذهب دون سداد أو استلام، ستظل البضاعة محجوزة على النظام ولن يتمكن عميل آخر من شرائها.
+- وإذا هبط مخزون منتج رئيسي، لا يمكن انتظار دخول موظف للمستودع لكي يكتشف ذلك بالصدفة؛ بل يجب أن ينبه النظام المسؤولين بصورة استباقية وآلية.
+
+---
+
+### 3. Why is this useful in a real backend? (فائدته في سوق العمل وعالم المشاريع الحقيقية)
+1. **Non-Blocking Distributed Processing**:
+   - نقل العمليات الثقيلة (التحليلات، الإشعارات، معالجة الدفعات) من الـ HTTP Thread Pool إلى Background Workers مستقلة؛ مما يحافظ على سرعة استجابة الـ API للمستخدمين حتى في أوقات الذروة.
+2. **Fault Tolerance & Automatic Retries (المقاومة التلقائية للأعطال)**:
+   - لو تعطل السيرفر أو انقطعت شبكة الداتابيز أثناء تنفيذ وظيفة مجدولة، تحتفظ Hangfire بحالة الوظيفة في SQL Server وتستأنف تنفيذها تلقائياً مع محاولات إعادة ذكية (`Automatic Retry with Exponential Backoff`).
+3. **Zero Zombie Inventory**:
+   - تحرير المخزون المحتجز تلقائياً دون أي تدخل يدوي، مما يرفع كفاءة دوران المخزون (Inventory Turnover) ومبيعات الشركة.
+
+---
+
+### 4. Why did we choose this approach? (لماذا هذا التوجه تحديداً؟)
+1. **Hangfire over IHostedService / BackgroundService**:
+   - `BackgroundService` المدمجة في .NET هي معالجة في الذاكرة (In-Memory) فقط؛ لو أُعيد تشغيل السيرفر أو عمل IIS Recycle، ستضيع كافة الوظائف المجدولة وتختفي للأبد!
+   - `Hangfire` تخزن الوظائف في SQL Server، مما يجعلها قوية، قابلة للتوسع في بيئة Distributed Clusters (عدة سيرفرات تخدم نفس الداتابيز دون تكرار الوظائف)، وتوفر Dashboard تفاعلي رائع لمراقبة الوظائف الفاشلة والناجحة وإعادة تشغيلها بضغطة زر.
+2. **Interface Abstraction in Application Layer**:
+   - وظائف الخلفية (`ILowStockNotifierJob`, `IStaleOrderCleanupJob`) معرفة كـ Interfaces في Application، ومنفذة في Infrastructure؛ تطبيقاً نقياً لـ Clean Architecture.
+
+---
+
+### 5. What alternatives exist? (ما هي البدائل المتاحة؟)
+1. **ASP.NET Core BackgroundService (`IHostedService`)**: تشغيل Tasks دورية داخل حلقة `while (!stoppingToken.IsCancellationRequested)`.
+2. **Quartz.NET**: مكتبة جدولة وظائف مفتوحة المصدر مشهورة في بيئة جافا ودوت نت.
+3. **SQL Server Agent Jobs**: كتابة Stored Procedures وجدولتها عبر SQL Server Agent.
+
+---
+
+### 6. Why are we NOT using those alternatives here? (لماذا رفضنا البدائل؟)
+- **BackgroundService**: لا توفر Persistence، ولا تملك Retry Policy ذكية، ولا لوحة تحكم للمراقبة، ولا تعمل بأمان في بيئة Multi-Instance Server Farm.
+- **Quartz.NET**: ممتازة ولكنها معقدة الإعداد (XML/JobDataMap) وتفتقر للوحة تحكم مدمجة غنية وسهلة مثل Hangfire Dashboard.
+- **SQL Server Agent**: يكسر مبدأ Clean Architecture بنقل منطق الأعمال (Business Logic) وحسابات الدومين من كود C# إلى داخل قاعدة البيانات كـ T-SQL Stored Procedures، مما يصعب اختباره ومراجعته برمجياً.
+
+---
+
+### 7. What problem does this approach solve? (ما المشكلة التي يحلها؟)
+- **Inventory Paralysis (شلل المخزون المتروك)**: استرداد البضاعة المحجوزة آلياً بعد انتهاء المهلة المحددة.
+- **Stock-Out Blindness**: القضاء على المفاجآت غير السارة لنفاد البضاعة عبر التنبيه المستمر قبل نفاد المخزون.
+- **Visibility into Async Tasks**: توفير شفافية كاملة للمديرين والمهندسين عبر Hangfire Dashboard لرؤية أوقات التنفيذ ومعدلات النجاح والفشل.
+
+---
+
+### 8. What could go wrong? (ما الذي قد يفشل وكيف نتجنبه؟)
+1. **Unauthorized Hangfire Dashboard Access**:
+   - ترك مسار `/hangfire` مفتوحاً للعامة يشكل ثغرة أمنية تسمح لأي مخترق بحذف الوظائف أو استعراض أسرار النظام.
+   - **الحل**: قمنا بتأمين المسار عبر [`HangfireAuthorizationFilter`](file:///d:/.NET%20Projects/Warehouse%20&%20Inventory%20Management%20System/src/WarehouseManagement.API/Filters/HangfireAuthorizationFilter.cs) الذي يقفل اللوحة تماماً إلا للمستخدمين المصادقين الحاملين لرتبة `Admin`.
+2. **Deadlocks & Concurrency during Background Sweeps**:
+   - عندما تقوم وظيفة الخلفية بإلغاء أوردر وفك حجز بضاعته في نفس اللحظة التي يحاول فيها أمين المخزن شحن نفس الأوردر.
+   - **الحل**: يتم الإلغاء داخل `IDbContextTransaction` مع الاعتماد على `RowVersion` لاكتشاف التضارب، بحيث ينجح الموظف إذا كان قد شحنه فعلاً وتتراجع وظيفة الخلفية بسلام.
+
+---
+
+### 9. What should I remember for an interview? (ماذا تقول في الإنترفيو؟)
+> **Interview Question**: "Why did you choose Hangfire over .NET BackgroundService for scheduled background jobs, and how do you prevent race conditions during stale order cleanups?"
+>
+> **الإجابة النموذجية**:
+> "We chose **Hangfire** over native `BackgroundService` because enterprise ERP/WMS architectures demand **persistent, distributed job processing with high availability**. Unlike in-memory hosted services, Hangfire persists jobs in SQL Server, providing automatic retries with exponential backoff, cluster-safe coordination (avoiding duplicate job executions across web farms), and real-time dashboard observability.  
+> For state-sensitive tasks like `StaleOrderCleanupJob`, operations execute inside an atomic database transaction (`ACID`). If a stale confirmed order is cancelled, we invoke `inventoryItem.ReleaseStock(qty)` to atomically restore allocations to `AvailableQuantity`. Furthermore, our entities use optimistic concurrency (`RowVersion`), ensuring that if a warehouse clerk dispatches an order concurrently with the background sweep, the conflict is cleanly detected without corrupting inventory balances."
+
+---
+
