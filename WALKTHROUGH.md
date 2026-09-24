@@ -1390,3 +1390,129 @@ purchaseOrder.Status = PurchaseOrderStatus.Received; // استلم بضاعة م
 
 ---
 
+## 22. Phase 13: Reporting & Advanced Analytics — Deep Dive
+
+### 1. What did we build? (ماذا بنينا؟)
+
+أضفنا في هذه المرحلة **نظام تقارير وتحليلات متكامل** يتضمن خمسة Endpoints تحليلية متخصصة، كل منها مبني وفق نمط CQRS كـ Query منفصل بـ Handler وDTO مخصص:
+
+| Report | Endpoint | Purpose |
+|---|---|---|
+| **Inventory Valuation** | `GET /api/reports/inventory-valuation` | إجمالي قيمة المخزون لكل مستودع = SUM(Qty × Price) |
+| **Sales Order Summary** | `GET /api/reports/sales-orders` | إيرادات المبيعات وعدد الأوردرات لكل حالة + أفضل 10 عملاء |
+| **Purchase Order Summary** | `GET /api/reports/purchase-orders` | إجمالي المشتريات من الموردين لكل حالة + أفضل 10 موردين |
+| **Top-Selling Products** | `GET /api/reports/top-selling-products` | أكثر المنتجات مبيعاً من أوردرات Completed فقط |
+| **Warehouse Utilization** | `GET /api/reports/warehouse-utilization` | نسبة استخدام كل مستودع مع Low/Out-of-Stock flags |
+
+---
+
+### 2. Architecture & Interfaces (المعمارية والواجهات)
+
+```
+Application Layer
+└── Features/Reports/
+    ├── DTOs/                          ← 5 immutable record DTOs (int IDs matching domain)
+    └── Queries/
+        ├── GetInventoryValuationReport/
+        │   ├── Query.cs    → IRequest<IReadOnlyList<InventoryValuationReportDto>>
+        │   └── Handler.cs
+        ├── GetSalesOrderSummaryReport/
+        │   ├── Query.cs + Handler.cs + Validator.cs
+        ├── GetPurchaseOrderSummaryReport/
+        ├── GetTopSellingProductsReport/
+        └── GetWarehouseUtilizationReport/
+
+API Layer
+└── Controllers/ReportsController.cs   ← Thin, 5 GET actions
+                                          [Authorize(Roles="Admin,WarehouseManager")]
+
+Tests Layer
+└── Features/Reports/ReportQueryHandlerTests.cs ← 19 unit tests (144 total passing)
+```
+
+**Key design decisions:**
+- All Queries implement `IRequest<T>` → automatically intercepted by `ValidationBehavior` + `LoggingBehavior`.
+- Handlers inject only `IApplicationDbContext` — zero infrastructure coupling.
+- DTOs are `sealed record` — immutable, structurally comparable, stack-friendly allocation.
+
+---
+
+### 3. Locking & Concurrency (القفل والتزامن)
+
+التقارير هي **Read-Only operations** — لذلك:
+
+- ✅ **`AsNoTracking()`** في كل Query: يوفر الذاكرة ويسرّع الاستعلامات لأن EF لا يتتبع الكيانات في ChangeTracker.
+- ✅ **لا `BeginTransaction`** في التقارير: القراءة لا تتطلب isolation لأنها لا تعدّل الحالة.
+- ✅ **READ COMMITTED (SQL Server default)**: الاستعلامات تقرأ آخر committed snapshot دون قفل الجداول.
+
+---
+
+### 4. EF Core GroupBy Strategy (استراتيجية الـ GroupBy)
+
+**المشكلة:** EF Core يفشل في ترجمة `GroupBy` بمفتاح يحتوي Navigation Property columns (مثل `Warehouse.Name`) لـ SQL صحيح، خاصة مع InMemory Provider.
+
+```csharp
+// ❌ يفشل مع InMemory أو ينتج SQL معقداً:
+.GroupBy(i => new { i.WarehouseId, i.Warehouse!.Name, i.Warehouse.Location })
+.Select(g => new { g.Key.Name, Total = g.Sum(i => i.Quantity) })
+```
+
+**القرار:** استخدام **Client-Side Grouping Pattern**:
+
+```csharp
+// ✅ الحل المعتمد: Fetch bounded set → Group client-side
+var items = await query.ToListAsync(cancellationToken); // Single SQL round-trip
+var result = items
+    .GroupBy(i => i.WarehouseId)   // Group in C# memory (safe — already filtered)
+    .Select(g => new ReportDto(...))
+    .ToList();
+```
+
+**متى يكون ذلك آمناً؟**
+- عندما يكون الـ Set مُقيَّداً مسبقاً (فلتر WarehouseId، نطاق تاريخ محدود، TopN).
+- التقارير ليست High-Frequency endpoints — يمكن إضافة Response Caching لاحقاً.
+
+---
+
+### 5. "Completed Only" for Top-Selling Products (لماذا Completed فقط؟)
+
+```csharp
+.Where(item => item.SalesOrder!.Status == OrderStatus.Completed && ...)
+```
+
+| Status | المعنى | يُحسب في المبيعات؟ |
+|---|---|---|
+| Pending | لم يُؤكَّد | ❌ |
+| Confirmed | محجوز لكن لم يُشحَن | ❌ |
+| **Completed** | **شُحِن فعلياً** | ✅ |
+| Cancelled | لم تتم | ❌ |
+
+الإحصاء على Completed فقط = **"Units Sold"** الحقيقي، وليس "Units Demanded" المتضخم.
+
+---
+
+### 6. Failures: Approaches that failed and exactly why (ما فشل وليه)
+
+| # | الخطأ | السبب | الحل |
+|---|---|---|---|
+| 1 | `GroupBy` server-side يفشل مع Navigation keys | EF Core InMemory لا يترجم GroupBy بـ Navigation columns | Client-side grouping بعد `ToListAsync()` |
+| 2 | `SalesOrderStatus` does not exist | الـ enum الحقيقي اسمه `OrderStatus` في `WarehouseManagement.Domain.Enums` | استبدال بـ `OrderStatus.Completed` إلخ |
+| 3 | `Operator '==' cannot be applied to 'int' and 'Guid'` | Domain يستخدم `int Id`، الـ DTOs استخدمت `Guid` | إعادة كتابة جميع DTOs والـ Queries بـ `int` |
+| 4 | `Cannot confirm a sales order without items` في الاختبارات | Domain Invariant: `Confirm()` تتحقق من وجود Items | إضافة `Product` + `AddItem()` قبل أي State Transition |
+| 5 | `Cannot approve a purchase order without items` | نفس القاعدة لـ `PurchaseOrder.Approve()` وـ`SubmitForApproval()` | نفس الحل: seed Product ثم `AddItem()` |
+
+---
+
+### 7. What should I remember for an interview? (ماذا تقول في الإنترفيو؟)
+
+> **Interview Question:** "How did you design the reporting layer, and what performance trade-offs did you make?"
+>
+> **الإجابة النموذجية:**
+> "Our reporting layer follows the same CQRS pattern — each report is a dedicated Query with its own Handler, DTO, and FluentValidation Validator. All handlers use `AsNoTracking()` universally since reports are read-only, eliminating EF's change-tracking overhead.
+>
+> For GroupBy aggregations, we chose **client-side grouping** after a single bounded database fetch, because EF Core's SQL GroupBy translation breaks down when group keys include navigation-property column values. Since report queries are always filtered (by warehouse ID, date range, or top-N limit), the in-memory set is small and safe to aggregate in C# — with no N+1 risk.
+>
+> The `TopSellingProducts` report filters to `OrderStatus.Completed` only — not Confirmed — because 'Confirmed' means stock is reserved but not yet physically shipped. Including it would overstate actual sell-through rates.
+>
+> Input parameters like `TopN` (1–100) and `TopCustomersCount` (1–50) are clamped both in FluentValidation and defensively inside the handler with `Math.Clamp()`, preventing unbounded result sets under load."
+
