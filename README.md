@@ -204,7 +204,7 @@ flowchart LR
 ## 📁 Solution Structure
 
 ```
-d:\.NET Projects\Warehouse & Inventory Management System
+Warehouse & Inventory Management System
 ├── src/
 │   ├── WarehouseManagement.Domain/                 # Core Domain Layer
 │   │   ├── Common/                                 # BaseEntity, AuditableEntity
@@ -434,14 +434,6 @@ Passed!  - Failed: 0, Passed: 144, Skipped: 0, Total: 144, Duration: 3.1s
 
 ### 4. Why Client-Side GroupBy in Reporting Handlers?
 - **EF Core GroupBy Resilience**: EF Core frequently encounters SQL translation limitations when executing complex `GroupBy` queries with navigation properties. Fetching bounded projection sets via `ToListAsync()` and performing grouping in-memory guarantees deterministic calculation and eliminates runtime query translation exceptions.
-
----
-
-## 📚 Mentorship & Deep-Dive Companion
-
-Looking for an in-depth senior engineering breakdown? Check out [WALKTHROUGH.md](file:///D:/.NET%20Projects/Warehouse%20&%20Inventory%20Management%20System/WALKTHROUGH.md).
-
-It contains **over 1,500 lines** of detailed architectural explanations, technical interview preparation Q&As, code walk-throughs, and bilingual (English & Egyptian Arabic) pedagogical reasoning written from the perspective of a Senior .NET Architect.
 
 ---
 
