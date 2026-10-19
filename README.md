@@ -8,7 +8,6 @@
 [![Hangfire](https://img.shields.io/badge/Jobs-Hangfire%20Scheduler-red?style=for-the-badge)](https://www.hangfire.io/)
 [![Scalar](https://img.shields.io/badge/Docs-Scalar%20OpenAPI-8A2BE2?style=for-the-badge)](https://scalar.com/)
 [![Tests](https://img.shields.io/badge/Tests-144%20Passed%20%2F%200%20Failed-success?style=for-the-badge&logo=checkmarx&logoColor=white)](tests/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 
 An enterprise-grade, high-performance **Warehouse & Inventory Management System (WMS)** built with **ASP.NET Core (.NET 8 LTS)** following **Clean Architecture**, **Domain-Driven Design (DDD)** tactical patterns, and **CQRS with MediatR**. 
 
